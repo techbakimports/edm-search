@@ -1,0 +1,8 @@
+librosa
+numpy
+soundfile
+pydub
+scikit-learn
+rich
+matplotlib
+dearpygui
