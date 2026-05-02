@@ -1,0 +1,10 @@
+python-dotenv
+librosa
+numpy
+soundfile
+pydub
+scikit-learn
+rich
+matplotlib
+dearpygui
+mutagen
