@@ -582,6 +582,25 @@ def _export_batch(fmt: str):
     threading.Thread(target=_do, daemon=True).start()
 
 
+# ── Utilitário de thumbnail ───────────────────────────────────────────
+_cover_tex_counter = 0
+
+def _register_cover_texture(data: bytes, size: int = 48) -> str | None:
+    """Converte bytes de imagem em texture DearPyGui. Retorna tag ou None."""
+    global _cover_tex_counter
+    try:
+        import io
+        from PIL import Image
+        img = Image.open(io.BytesIO(data)).convert("RGBA").resize((size, size), Image.LANCZOS)
+        flat = [v / 255.0 for px in img.getdata() for v in px]
+        tag = f"__cov_{_cover_tex_counter}__"
+        _cover_tex_counter += 1
+        dpg.add_static_texture(size, size, flat, tag=tag, parent="__covers__")
+        return tag
+    except Exception:
+        return None
+
+
 # ── Auto-tagging ──────────────────────────────────────────────────────
 def _open_tag_target():
     def _pick():
@@ -690,7 +709,14 @@ def _apply_tag_table(results: list[dict], dry_run: bool):
         dpg.add_text(r.get("title") or "—",      parent=row, color=list(ACCENT2))
         dpg.add_text(r.get("year") or "—",       parent=row, color=list(YELLOW))
 
-        if r.get("cover_written"):
+        cover_data = r.get("cover_preview")
+        if cover_data:
+            tex = _register_cover_texture(cover_data)
+            if tex:
+                dpg.add_image(tex, parent=row, width=48, height=48)
+            else:
+                dpg.add_text("✓" if r.get("cover_written") else "img?", parent=row, color=list(GREEN))
+        elif r.get("cover_written"):
             dpg.add_text("✓", parent=row, color=list(GREEN))
         else:
             dpg.add_text("—", parent=row, color=list(DIM))
@@ -895,6 +921,7 @@ def _build_batch_tab():
 # ── Launch ────────────────────────────────────────────────────────────
 def launch():
     dpg.create_context()
+    dpg.add_texture_registry(tag="__covers__")
 
     with dpg.theme() as global_theme:
         with dpg.theme_component(dpg.mvAll):
