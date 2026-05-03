@@ -402,15 +402,17 @@ def _export_results(results: list[dict], folder: str, fmt: str):
     console.print(f"[green]Exportado: {out_path}[/green]")
 
 
-def tag_command(target: str, dry_run: bool, no_year: bool, no_cover: bool):
+def tag_command(target: str, dry_run: bool, no_year: bool, no_cover: bool, no_genre: bool = False):
     """Executa o auto-tagging a partir do nome dos arquivos."""
     from tagger import tag_file, tag_folder
 
     fetch_year  = not no_year
     fetch_cover = not no_cover
+    fetch_genre = not no_genre
 
     if os.path.isfile(target):
-        results = [tag_file(target, dry_run=dry_run, fetch_year_online=fetch_year, fetch_cover=fetch_cover)]
+        results = [tag_file(target, dry_run=dry_run, fetch_year_online=fetch_year,
+                            fetch_cover=fetch_cover, fetch_genre=fetch_genre)]
     elif os.path.isdir(target):
         console.print(f"[cyan]Buscando arquivos de áudio em: {target}[/cyan]\n")
         with Progress(
@@ -420,7 +422,8 @@ def tag_command(target: str, dry_run: bool, no_year: bool, no_cover: bool):
             transient=True,
         ) as prog:
             prog.add_task("Tagging...", total=None)
-            results = tag_folder(target, dry_run=dry_run, fetch_year_online=fetch_year, fetch_cover=fetch_cover)
+            results = tag_folder(target, dry_run=dry_run, fetch_year_online=fetch_year,
+                                 fetch_cover=fetch_cover, fetch_genre=fetch_genre)
     else:
         console.print(f"[red]Caminho não encontrado: {target}[/red]")
         sys.exit(1)
@@ -432,9 +435,10 @@ def tag_command(target: str, dry_run: bool, no_year: bool, no_cover: bool):
         box=box.ROUNDED,
         border_style="cyan",
     )
-    table.add_column("Arquivo",  style="white",   max_width=40)
-    table.add_column("Artista",  style="cyan",    max_width=25)
-    table.add_column("Título",   style="magenta", max_width=35)
+    table.add_column("Arquivo",  style="white",   max_width=35)
+    table.add_column("Artista",  style="cyan",    max_width=22)
+    table.add_column("Título",   style="magenta", max_width=30)
+    table.add_column("Gênero",   style="green",   max_width=22)
     table.add_column("Ano",      style="yellow",  justify="center", width=6)
     table.add_column("Capa",     justify="center", width=5)
     table.add_column("Status",   justify="center", width=10)
@@ -457,6 +461,7 @@ def tag_command(target: str, dry_run: bool, no_year: bool, no_cover: bool):
             r.get('file', ''),
             r.get('artist') or '[dim]—[/dim]',
             r.get('title') or '[dim]—[/dim]',
+            r.get('genre') or '[dim]—[/dim]',
             r.get('year') or '[dim]—[/dim]',
             cover_col,
             status,
@@ -489,6 +494,7 @@ def main():
     parser.add_argument('--dry-run',  action='store_true', help="Com --tag: pré-visualiza sem gravar")
     parser.add_argument('--no-year',  action='store_true', help="Com --tag: não busca ano na internet")
     parser.add_argument('--no-cover', action='store_true', help="Com --tag: não baixa capa automática")
+    parser.add_argument('--no-genre', action='store_true', help="Com --tag: não busca gênero automaticamente")
     args = parser.parse_args()
 
     if args.gui:
@@ -497,7 +503,8 @@ def main():
         return
 
     if args.tag:
-        tag_command(args.tag, dry_run=args.dry_run, no_year=args.no_year, no_cover=args.no_cover)
+        tag_command(args.tag, dry_run=args.dry_run, no_year=args.no_year,
+                    no_cover=args.no_cover, no_genre=args.no_genre)
         return
 
     if args.compare:

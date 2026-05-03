@@ -187,6 +187,10 @@ def _fetch_itunes_data(artist: str, title: str) -> dict:
     if artwork:
         result['cover_url'] = re.sub(r'\d+x\d+bb', '600x600bb', artwork)
 
+    genre = r.get('primaryGenreName', '')
+    if genre and genre.lower() != 'music':
+        result['genre'] = genre
+
     return result
 
 
@@ -288,10 +292,62 @@ def _fetch_deezer_data(artist: str, title: str) -> dict:
             rd = alb.get('release_date', '')
             if rd and len(rd) >= 4 and rd[:4].isdigit():
                 result['year'] = rd[:4]
+            for g in alb.get('genres', {}).get('data', []):
+                name = g.get('name', '').strip()
+                if name:
+                    result['genre'] = name
+                    break
         except Exception:
             pass
 
     return result
+
+
+# ── Last.fm genre ─────────────────────────────────────────────────────────────
+
+# Tags do Last.fm que não representam gênero musical
+_LASTFM_SKIP_RE = re.compile(
+    r'seen.live|favourit|favorit|loved?\b|amazing|awesome|beautiful|'
+    r'\bbest\b|\bclassic\b|essential|\bgood\b|\bgreat\b|playlist|'
+    r'^\d+s?$|\bunder\s*\d+|all.time',
+    re.IGNORECASE,
+)
+
+
+def _fetch_lastfm_genre(artist: str, title: str) -> str | None:
+    """
+    Busca o gênero via Last.fm track.getTopTags (requer LASTFM_API_KEY no .env).
+    Retorna o primeiro tag com votos suficientes que pareça um gênero real.
+    """
+    from config import LASTFM_API_KEY
+    if not LASTFM_API_KEY:
+        return None
+    params = urllib.parse.urlencode({
+        'method':      'track.getTopTags',
+        'artist':      artist,
+        'track':       _clean_title(title),
+        'api_key':     LASTFM_API_KEY,
+        'format':      'json',
+        'autocorrect': 1,
+    })
+    req = urllib.request.Request(
+        f'https://ws.audioscrobbler.com/2.0/?{params}',
+        headers={'User-Agent': 'EDMAnalyzer/1.0 (edm-search)'},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode())
+    except Exception:
+        return None
+    for tag in data.get('toptags', {}).get('tag', []):
+        name  = tag.get('name', '').strip()
+        count = int(tag.get('count', 0))
+        if count < 5 or len(name) < 3:
+            continue
+        if _LASTFM_SKIP_RE.search(name):
+            continue
+        return name.title()
+    return None
 
 
 # ── Web scraper (sem chave de API) ────────────────────────────────────────────
@@ -380,6 +436,16 @@ def _scrape_beatport(artist: str, title: str) -> dict:
     elif isinstance(image, str) and image.startswith('http'):
         result['cover_url'] = image
 
+    # Gênero — preferir sub_genre (mais específico para EDM)
+    for key in ('sub_genres', 'subgenres', 'genres'):
+        items = track.get(key) or []
+        if isinstance(items, list) and items:
+            g = items[0]
+            name = (g.get('name') if isinstance(g, dict) else str(g)).strip()
+            if name:
+                result['genre'] = name
+                break
+
     return result
 
 
@@ -445,40 +511,47 @@ def _scrape_web(artist: str, title: str) -> dict:
 
 # ── Orquestrador ──────────────────────────────────────────────────────────────
 #
-#  ANO:  Beatport → MusicBrainz → Deezer → iTunes → DDG texto → Discogs
-#  CAPA: Deezer  → iTunes → MusicBrainz → Beatport → Discogs
+#  ANO:    Beatport → MusicBrainz → Deezer → iTunes → DDG texto → Discogs
+#  CAPA:   Deezer  → iTunes → MusicBrainz → Beatport → Discogs
+#  GÊNERO: Beatport → Deezer → iTunes → Last.fm → Discogs
 #
 def _fetch_all_metadata(artist: str, title: str) -> dict:
-    """Retorna {'year': str | None, 'cover_bytes': bytes | None}."""
+    """Retorna {'year': str|None, 'cover_bytes': bytes|None, 'genre': str|None}."""
     year:        str   | None = None
     cover_bytes: bytes | None = None
+    genre:       str   | None = None
 
-    # 1. Beatport scraper — melhor fonte de ano para EDM
+    # 1. Beatport — melhor para EDM (ano + gênero precisos + capa)
     try:
-        bp = _scrape_beatport(artist, title)
-        year = bp.get('year')
+        bp    = _scrape_beatport(artist, title)
+        year  = bp.get('year')
+        genre = bp.get('genre')
         if bp.get('cover_url'):
             cover_bytes = _try_cover(bp['cover_url'])
     except Exception:
         pass
 
-    # 2. Deezer — capa confiável (matched artista+faixa, cover_xl 1000×1000)
-    if not cover_bytes:
+    # 2. Deezer — capa confiável + ano + gênero
+    if not cover_bytes or not genre:
         try:
             dz = _fetch_deezer_data(artist, title)
             if not year:
                 year = dz.get('year')
-            if dz.get('cover_url'):
+            if not genre:
+                genre = dz.get('genre')
+            if not cover_bytes and dz.get('cover_url'):
                 cover_bytes = _try_cover(dz['cover_url'])
         except Exception:
             pass
 
-    # 3. iTunes — capa + ano como fallback
-    if not year or not cover_bytes:
+    # 3. iTunes — capa + ano + gênero como fallback
+    if not year or not cover_bytes or not genre:
         try:
             it = _fetch_itunes_data(artist, title)
             if not year:
                 year = it.get('year')
+            if not genre:
+                genre = it.get('genre')
             if not cover_bytes and it.get('cover_url'):
                 cover_bytes = _try_cover(it['cover_url'])
         except Exception:
@@ -498,25 +571,34 @@ def _fetch_all_metadata(artist: str, title: str) -> dict:
         except Exception:
             pass
 
-    # 5. DuckDuckGo texto — só para ano
+    # 5. Last.fm — gênero via tags crowdsourced (requer LASTFM_API_KEY)
+    if not genre:
+        try:
+            genre = _fetch_lastfm_genre(artist, title)
+        except Exception:
+            pass
+
+    # 6. DuckDuckGo texto — só para ano
     if not year:
         try:
             year = _scrape_ddg_year(artist, title)
         except Exception:
             pass
 
-    # 6. Discogs — último recurso
-    if not year or not cover_bytes:
+    # 7. Discogs — último recurso
+    if not year or not cover_bytes or not genre:
         try:
             dc = _fetch_discogs_data(artist, title)
             if not year:
                 year = dc.get('year')
+            if not genre:
+                genre = dc.get('genre')
             if not cover_bytes and dc.get('cover_url'):
                 cover_bytes = _try_cover(dc['cover_url'])
         except Exception:
             pass
 
-    return {'year': year, 'cover_bytes': cover_bytes}
+    return {'year': year, 'cover_bytes': cover_bytes, 'genre': genre}
 
 
 # ── Cover Art Archive ─────────────────────────────────────────────────────────
@@ -631,13 +713,21 @@ def write_cover(path: str, image_bytes: bytes) -> bool:
 
 # ── Escrita de tags ───────────────────────────────────────────────────────────
 
-def write_tags(path: str, artist: str, title: str, year: str | None, dry_run: bool = False) -> dict:
+def write_tags(
+    path: str,
+    artist: str,
+    title: str,
+    year: str | None,
+    genre: str | None = None,
+    dry_run: bool = False,
+) -> dict:
     result = {
         'path':          path,
         'file':          Path(path).name,
         'artist':        artist,
         'title':         title,
-        'year':          year or '—',
+        'year':          year  or '—',
+        'genre':         genre or '—',
         'written':       False,
         'cover_written': False,
         'error':         None,
@@ -656,7 +746,9 @@ def write_tags(path: str, artist: str, title: str, year: str | None, dry_run: bo
         audio.tags['artist'] = artist
         audio.tags['title']  = title
         if year:
-            audio.tags['date'] = year
+            audio.tags['date']  = year
+        if genre:
+            audio.tags['genre'] = genre
         audio.save()
         result['written'] = True
     except Exception as e:
@@ -671,6 +763,7 @@ def tag_file(
     dry_run: bool = False,
     fetch_year_online: bool = True,
     fetch_cover: bool = True,
+    fetch_genre: bool = True,
 ) -> dict:
     """
     Pipeline completo para um arquivo:
@@ -697,13 +790,15 @@ def tag_file(
 
     year:        str   | None = None
     cover_bytes: bytes | None = None
+    genre:       str   | None = None
 
-    if fetch_year_online or fetch_cover:
+    if fetch_year_online or fetch_cover or fetch_genre:
         meta        = _fetch_all_metadata(artist, title)
         year        = meta['year']        if fetch_year_online else None
         cover_bytes = meta['cover_bytes'] if fetch_cover       else None
+        genre       = meta['genre']       if fetch_genre       else None
 
-    result = write_tags(path, artist, title, year, dry_run=dry_run)
+    result = write_tags(path, artist, title, year, genre=genre, dry_run=dry_run)
 
     if fetch_cover and cover_bytes:
         result['cover_preview'] = cover_bytes
@@ -718,6 +813,7 @@ def tag_folder(
     dry_run: bool = False,
     fetch_year_online: bool = True,
     fetch_cover: bool = True,
+    fetch_genre: bool = True,
     extensions: list[str] | None = None,
 ) -> list[dict]:
     """Taga todos os arquivos de áudio de uma pasta."""
@@ -729,6 +825,7 @@ def tag_folder(
         if Path(f).suffix.lower() in exts
     ]
     return [
-        tag_file(p, dry_run=dry_run, fetch_year_online=fetch_year_online, fetch_cover=fetch_cover)
+        tag_file(p, dry_run=dry_run, fetch_year_online=fetch_year_online,
+                 fetch_cover=fetch_cover, fetch_genre=fetch_genre)
         for p in paths
     ]

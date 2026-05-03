@@ -631,6 +631,7 @@ def _run_tag():
     dry_run   = dpg.get_value(W["tag_dry_run"])
     no_year   = dpg.get_value(W["tag_no_year"])
     no_cover  = dpg.get_value(W["tag_no_cover"])
+    no_genre  = dpg.get_value(W["tag_no_genre"])
 
     if not target:
         return
@@ -643,6 +644,7 @@ def _run_tag():
         try:
             fetch_year  = not no_year
             fetch_cover = not no_cover
+            fetch_genre = not no_genre
             if os.path.isfile(target):
                 files = [target]
             else:
@@ -662,6 +664,7 @@ def _run_tag():
                 results.append(tag_file(
                     fpath, dry_run=dry_run,
                     fetch_year_online=fetch_year, fetch_cover=fetch_cover,
+                    fetch_genre=fetch_genre,
                 ))
 
             _ui(_apply_tag_table, results, dry_run)
@@ -699,14 +702,15 @@ def _apply_tag_table(results: list[dict], dry_run: bool):
     )
     W["tag_table"] = tbl
 
-    for col in ["Arquivo", "Artista", "Título", "Ano", "Capa", "Status"]:
+    for col in ["Arquivo", "Artista", "Título", "Gênero", "Ano", "Capa", "Status"]:
         dpg.add_table_column(parent=tbl, label=col)
 
     for r in results:
         row = dpg.add_table_row(parent=tbl)
-        dpg.add_text((r.get("file") or "")[:42], parent=row)
+        dpg.add_text((r.get("file") or "")[:38],  parent=row)
         dpg.add_text(r.get("artist") or "—",     parent=row, color=list(ACCENT))
         dpg.add_text(r.get("title") or "—",      parent=row, color=list(ACCENT2))
+        dpg.add_text(r.get("genre") or "—",      parent=row, color=list(GREEN))
         dpg.add_text(r.get("year") or "—",       parent=row, color=list(YELLOW))
 
         cover_data = r.get("cover_preview")
@@ -870,7 +874,9 @@ def _build_tag_tab():
         dpg.add_spacer(width=16)
         W["tag_no_year"]  = dpg.add_checkbox(label="Não buscar ano online")
         dpg.add_spacer(width=16)
-        W["tag_no_cover"] = dpg.add_checkbox(label="Não buscar capa")
+        W["tag_no_cover"]  = dpg.add_checkbox(label="Não buscar capa")
+        dpg.add_spacer(width=16)
+        W["tag_no_genre"] = dpg.add_checkbox(label="Não buscar gênero")
 
     dpg.add_spacer(height=6)
     W["tag_run_btn"] = dpg.add_button(
