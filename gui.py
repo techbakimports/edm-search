@@ -628,10 +628,10 @@ def _open_tag_folder():
 
 def _run_tag():
     target    = dpg.get_value(W["tag_target_text"])
-    dry_run   = dpg.get_value(W["tag_dry_run"])
-    no_year   = dpg.get_value(W["tag_no_year"])
-    no_cover  = dpg.get_value(W["tag_no_cover"])
-    no_genre  = dpg.get_value(W["tag_no_genre"])
+    dry_run     = dpg.get_value(W["tag_dry_run"])
+    apply_year  = dpg.get_value(W["tag_apply_year"])
+    apply_cover = dpg.get_value(W["tag_apply_cover"])
+    no_genre    = dpg.get_value(W["tag_no_genre"])
 
     if not target:
         return
@@ -642,8 +642,8 @@ def _run_tag():
 
     def _do():
         try:
-            fetch_year  = not no_year
-            fetch_cover = not no_cover
+            fetch_year  = apply_year
+            fetch_cover = apply_cover
             fetch_genre = not no_genre
             if os.path.isfile(target):
                 files = [target]
@@ -870,13 +870,13 @@ def _build_tag_tab():
 
     dpg.add_spacer(height=6)
     with dpg.group(horizontal=True):
-        W["tag_dry_run"]  = dpg.add_checkbox(label="Dry-run (não grava)")
+        W["tag_dry_run"]    = dpg.add_checkbox(label="Dry-run (não grava)")
         dpg.add_spacer(width=16)
-        W["tag_no_year"]  = dpg.add_checkbox(label="Não buscar ano online")
+        W["tag_apply_year"] = dpg.add_checkbox(label="Aplicar ano", default_value=True)
         dpg.add_spacer(width=16)
-        W["tag_no_cover"]  = dpg.add_checkbox(label="Não buscar capa")
+        W["tag_apply_cover"] = dpg.add_checkbox(label="Aplicar capa", default_value=True)
         dpg.add_spacer(width=16)
-        W["tag_no_genre"] = dpg.add_checkbox(label="Não buscar gênero")
+        W["tag_no_genre"]   = dpg.add_checkbox(label="Não buscar gênero")
 
     dpg.add_spacer(height=6)
     W["tag_run_btn"] = dpg.add_button(
