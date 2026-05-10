@@ -5,6 +5,10 @@ Uso: python gui.py  ou  python main.py --gui
 import csv
 import json
 import os
+import re
+import shutil
+import subprocess
+import sys
 import threading
 import queue
 import ctypes
@@ -41,6 +45,10 @@ W: dict = {}
 _tracks        = {"A": None, "B": None}
 _batch_results: list[dict] = []
 _batch_folder:  str | None = None
+_dl_process:      "subprocess.Popen | None" = None
+_dl_dest_folder:  str                       = os.path.expanduser("~/Downloads")
+_dl_log_lines:    list                      = []
+_dl_search_results: list                    = []
 
 # ── Paleta — neon green + purple ─────────────────────────────────────
 ACCENT   = (50,  255,  80, 255)   # neon green — primário
@@ -224,7 +232,7 @@ def _analyze(slot: str, path: str):
 
 
 def _apply_results(slot: str, f: dict, c: dict):
-    dpg.set_value(W[f"status_{slot}"], "Concluído ✓")
+    dpg.set_value(W[f"status_{slot}"], "Concluído OK")
     dpg.set_value(W[f"bpm_{slot}"],    f"{f['bpm']:.1f}")
     dpg.set_value(W[f"tom_{slot}"],    f["dominant_key"])
     dpg.set_value(W[f"dur_{slot}"],    _fmt_dur(f["duration_seconds"]))
@@ -601,6 +609,498 @@ def _register_cover_texture(data: bytes, size: int = 48) -> str | None:
         return None
 
 
+# ── Download de músicas ───────────────────────────────────────────────
+_YTDLP_EXE_URL = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe"
+
+
+def _dl_install_ytdlp():
+    """Tenta pip install; se falhar, baixa o .exe diretamente do GitHub."""
+    _ui(dpg.set_value,      W["dl_status"],      "Instalando yt-dlp via pip...")
+    _ui(dpg.configure_item, W["dl_install_btn"], enabled=False)
+
+    def _do():
+        # ── Tentativa 1: pip ──────────────────────────────────────────
+        pip_ok = False
+        try:
+            r = subprocess.run(
+                [sys.executable, "-m", "pip", "install", "yt-dlp"],
+                capture_output=True, text=True, encoding="utf-8",
+                creationflags=subprocess.CREATE_NO_WINDOW,
+                timeout=120,
+            )
+            pip_ok = r.returncode == 0
+        except Exception:
+            pass
+
+        if pip_ok and _find_ytdlp():
+            _ui(dpg.set_value,      W["dl_status"],     "yt-dlp instalado via pip! Pronto para usar.")
+            _ui(dpg.configure_item, W["dl_ytdlp_warn"], show=False)
+            _ui(dpg.configure_item, W["dl_install_btn"], enabled=True)
+            return
+
+        # ── Tentativa 2: baixar yt-dlp.exe diretamente ───────────────
+        _ui(dpg.set_value, W["dl_status"],
+            "pip falhou. Baixando yt-dlp.exe diretamente...")
+        try:
+            import urllib.request
+            dest_exe = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                    "yt-dlp.exe")
+            urllib.request.urlretrieve(_YTDLP_EXE_URL, dest_exe)
+            if os.path.isfile(dest_exe) and os.path.getsize(dest_exe) > 0:
+                _ui(dpg.set_value,      W["dl_status"],     "yt-dlp.exe baixado! Pronto para usar.")
+                _ui(dpg.configure_item, W["dl_ytdlp_warn"], show=False)
+            else:
+                raise RuntimeError("Arquivo baixado está vazio.")
+        except Exception as e:
+            _ui(dpg.set_value, W["dl_status"],
+                f"Falha no download automático ({e}). "
+                "Baixe yt-dlp.exe manualmente em github.com/yt-dlp/yt-dlp/releases "
+                "e coloque na pasta do app.")
+        finally:
+            _ui(dpg.configure_item, W["dl_install_btn"], enabled=True)
+
+    threading.Thread(target=_do, daemon=True).start()
+
+
+def _run_search():
+    global _dl_search_results
+    query = dpg.get_value(W["dl_search_input"]).strip()
+    if not query:
+        return
+
+    ytdlp = _find_ytdlp()
+    if not ytdlp:
+        _ui(dpg.set_value, W["dl_search_status"], "yt-dlp não encontrado.")
+        return
+
+    _ui(dpg.set_value,      W["dl_search_status"], "Pesquisando...")
+    _ui(dpg.configure_item, W["dl_search_btn"],    enabled=False)
+
+    def _do():
+        global _dl_search_results
+        proc = None
+        try:
+            proc = subprocess.Popen(
+                [ytdlp, "--flat-playlist", "--dump-json", f"ytsearch10:{query}"],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True, encoding="utf-8", errors="replace",
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            )
+
+            # Lê stdout em thread separada para não bloquear
+            line_q: queue.Queue = queue.Queue()
+
+            def _reader():
+                try:
+                    for line in proc.stdout:
+                        line_q.put(line)
+                finally:
+                    line_q.put(None)
+
+            threading.Thread(target=_reader, daemon=True).start()
+
+            import time
+            entries = []
+            deadline = time.monotonic() + 90
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    proc.kill()
+                    break
+                try:
+                    line = line_q.get(timeout=min(remaining, 2.0))
+                    if line is None:
+                        break
+                    line = line.strip()
+                    if line.startswith("{"):
+                        try:
+                            entries.append(json.loads(line))
+                        except json.JSONDecodeError:
+                            pass
+                except queue.Empty:
+                    continue
+
+            _dl_search_results = entries
+            _ui(_apply_search_table, entries)
+            _ui(dpg.set_value, W["dl_search_status"],
+                f"{len(entries)} resultado(s)" if entries else "Nenhum resultado encontrado.")
+        except Exception as e:
+            import traceback; traceback.print_exc()
+            _ui(dpg.set_value, W["dl_search_status"], f"Erro: {e}")
+        finally:
+            if proc and proc.poll() is None:
+                proc.kill()
+            _ui(dpg.configure_item, W["dl_search_btn"], enabled=True)
+
+    threading.Thread(target=_do, daemon=True).start()
+
+
+def _apply_search_table(entries: list):
+    prev = W.get("dl_search_table")
+    if prev:
+        try:
+            dpg.delete_item(prev)
+        except Exception:
+            pass
+    if not entries:
+        return
+
+    tbl = dpg.add_table(
+        parent=W["dl_search_table_container"],
+        header_row=True,
+        borders_innerH=True,
+        borders_outerH=True,
+        borders_outerV=True,
+        row_background=True,
+    )
+    W["dl_search_table"] = tbl
+
+    for col in ["#", "Título", "Canal", "Duração", "Baixar"]:
+        dpg.add_table_column(parent=tbl, label=col)
+
+    for i, entry in enumerate(entries):
+        vid_id   = entry.get("id") or ""
+        title    = (entry.get("title") or "?")[:58]
+        uploader = (entry.get("uploader") or entry.get("channel") or "—")[:26]
+        dur      = entry.get("duration")
+        dur_str  = _fmt_dur(float(dur)) if dur else "—"
+
+        # url pode ser None, string vazia, só o ID, ou URL completa
+        url_raw = entry.get("url") or entry.get("webpage_url") or ""
+        if url_raw.startswith("http"):
+            url = url_raw
+        elif url_raw:          # yt-dlp devolveu só o ID no campo url
+            url = f"https://www.youtube.com/watch?v={url_raw}"
+        elif vid_id:
+            url = f"https://www.youtube.com/watch?v={vid_id}"
+        else:
+            url = ""
+
+        row = dpg.add_table_row(parent=tbl)
+        dpg.add_text(str(i + 1), parent=row, color=list(DIM))
+        dpg.add_text(title,      parent=row)
+        dpg.add_text(uploader,   parent=row, color=list(DIM))
+        dpg.add_text(dur_str,    parent=row, color=list(YELLOW))
+        with dpg.group(horizontal=True, parent=row):
+            dpg.add_button(
+                label="MP3",
+                callback=lambda s, a, u: _dl_from_result(u, audio=True),
+                user_data=url,
+                enabled=bool(url),
+            )
+            dpg.add_spacer(width=4)
+            dpg.add_button(
+                label="MP4",
+                callback=lambda s, a, u: _dl_from_result(u, audio=False),
+                user_data=url,
+                enabled=bool(url),
+            )
+
+
+def _dl_from_result(url: str, audio: bool):
+    """Baixa diretamente a partir de um resultado de busca."""
+    if not url or not url.startswith("http"):
+        dpg.set_value(W["dl_search_status"], "URL inválida neste resultado.")
+        return
+    # Preenche o campo e expande a seção para o usuário ver o progresso
+    dpg.set_value(W["dl_url"],  url)
+    dpg.set_value(W["dl_type"], "Áudio" if audio else "Vídeo")
+    _dl_update_format_visibility()
+    dpg.set_value(W["dl_url_section"], True)   # abre o painel "Baixar por URL"
+    dpg.set_value(W["dl_search_status"], "Baixando...")
+    _run_download(direct_url=url, direct_audio=audio)
+
+
+def _find_ytdlp() -> str | None:
+    here = os.path.dirname(os.path.abspath(__file__))
+    for name in ("yt-dlp.exe", "yt-dlp"):
+        candidate = os.path.join(here, name)
+        if os.path.isfile(candidate):
+            return candidate
+    return shutil.which("yt-dlp")
+
+
+def _dl_paste_url():
+    try:
+        ctypes.windll.user32.OpenClipboard(None)
+        CF_UNICODETEXT = 13
+        h = ctypes.windll.user32.GetClipboardData(CF_UNICODETEXT)
+        text = ctypes.wstring_at(h) if h else ""
+        ctypes.windll.user32.CloseClipboard()
+        if text.strip():
+            _ui(dpg.set_value, W["dl_url"], text.strip())
+    except Exception:
+        try:
+            ctypes.windll.user32.CloseClipboard()
+        except Exception:
+            pass
+
+
+def _dl_pick_folder():
+    def _pick():
+        global _dl_dest_folder
+        folder = _win_open_folder("Pasta de destino para downloads")
+        if folder:
+            _dl_dest_folder = folder
+            _ui(dpg.set_value, W["dl_dest_text"], folder)
+    threading.Thread(target=_pick, daemon=True).start()
+
+
+def _dl_update_format_visibility():
+    is_audio = dpg.get_value(W["dl_type"]) == "Áudio"
+    dpg.configure_item(W["dl_audio_grp"], show=is_audio)
+    dpg.configure_item(W["dl_video_grp"], show=not is_audio)
+
+
+def _dl_append_log(line: str):
+    global _dl_log_lines
+    _dl_log_lines.append(line)
+    if len(_dl_log_lines) > 300:
+        _dl_log_lines = _dl_log_lines[-300:]
+    _ui(dpg.set_value, W["dl_log"], "\n".join(_dl_log_lines))
+
+
+def _stop_download():
+    proc = _dl_process
+    if proc is not None and proc.poll() is None:
+        proc.terminate()
+        _ui(dpg.set_value,      W["dl_status"],   "Download cancelado.")
+        _ui(dpg.configure_item, W["dl_run_btn"],  enabled=True)
+        _ui(dpg.configure_item, W["dl_stop_btn"], enabled=False)
+
+
+def _run_download(direct_url: str | None = None, direct_audio: bool | None = None):
+    global _dl_process, _dl_log_lines
+
+    # Aceita valores diretos (busca) ou lê dos widgets (botão Baixar)
+    url = direct_url or dpg.get_value(W["dl_url"]).strip()
+    if not url or not url.startswith("http"):
+        _ui(dpg.set_value, W["dl_status"], "Insira uma URL válida (deve começar com http).")
+        return
+
+    ytdlp = _find_ytdlp()
+    if not ytdlp:
+        _ui(dpg.set_value, W["dl_status"],
+            "yt-dlp não encontrado. Coloque yt-dlp.exe na pasta do projeto ou execute: pip install yt-dlp")
+        return
+
+    is_audio = direct_audio if direct_audio is not None else (dpg.get_value(W["dl_type"]) == "Áudio")
+    playlist  = dpg.get_value(W["dl_playlist"])
+    dest      = _dl_dest_folder
+    pl_flag   = "--yes-playlist" if playlist else "--no-playlist"
+
+    _AUDIO_QUAL = {
+        "Melhor (320k)": "0",
+        "Alta (256k)":   "5",
+        "Média (192k)":  "7",
+        "Baixa (128k)":  "9",
+    }
+    _VIDEO_FMT_SEL = {
+        "Melhor": "bestvideo+bestaudio/best",
+        "1080p":  "bestvideo[height<=1080]+bestaudio/best[height<=1080]",
+        "720p":   "bestvideo[height<=720]+bestaudio/best[height<=720]",
+        "480p":   "bestvideo[height<=480]+bestaudio/best[height<=480]",
+        "360p":   "bestvideo[height<=360]+bestaudio/best[height<=360]",
+    }
+
+    if is_audio:
+        fmt  = dpg.get_value(W["dl_audio_fmt"])
+        qual = _AUDIO_QUAL.get(dpg.get_value(W["dl_audio_quality"]), "0")
+        cmd  = [ytdlp, "-x",
+                "--audio-format", fmt,
+                "--audio-quality", qual,
+                "--newline", pl_flag,
+                "-o", os.path.join(dest, "%(title)s.%(ext)s"),
+                url]
+    else:
+        fmt     = dpg.get_value(W["dl_video_fmt"])
+        fmt_sel = _VIDEO_FMT_SEL.get(dpg.get_value(W["dl_video_quality"]),
+                                      "bestvideo+bestaudio/best")
+        cmd     = [ytdlp,
+                   "-f", fmt_sel,
+                   "--merge-output-format", fmt,
+                   "--newline", pl_flag,
+                   "-o", os.path.join(dest, "%(title)s.%(ext)s"),
+                   url]
+
+    _dl_log_lines = []
+    _ui(dpg.set_value,      W["dl_log"],      "")
+    _ui(dpg.set_value,      W["dl_status"],   "Iniciando download...")
+    _ui(dpg.set_value,      W["dl_progress"], 0.0)
+    _ui(dpg.configure_item, W["dl_run_btn"],  enabled=False)
+    _ui(dpg.configure_item, W["dl_stop_btn"], enabled=True)
+
+    def _do():
+        global _dl_process
+        proc = None
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            )
+            _dl_process = proc
+            for raw in proc.stdout:
+                line = raw.rstrip()
+                if not line:
+                    continue
+                _dl_append_log(line)
+                m = re.search(r'\[download\]\s+([\d.]+)%', line)
+                if m:
+                    _ui(dpg.set_value, W["dl_progress"],
+                        min(float(m.group(1)) / 100.0, 1.0))
+                _ui(dpg.set_value, W["dl_status"], line[:100])
+
+            proc.wait()
+            rc = proc.returncode
+            if rc == 0:
+                _ui(dpg.set_value, W["dl_status"],        "Concluído OK")
+                _ui(dpg.set_value, W["dl_progress"],      1.0)
+                _ui(dpg.set_value, W["dl_search_status"], "Download concluído OK")
+            else:
+                _ui(dpg.set_value, W["dl_status"],        f"Encerrado com erro (código {rc})")
+                _ui(dpg.set_value, W["dl_search_status"], f"Erro no download (código {rc})")
+        except Exception as e:
+            import traceback; traceback.print_exc()
+            _ui(dpg.set_value, W["dl_status"], f"Erro: {e}")
+        finally:
+            _dl_process = None
+            _ui(dpg.configure_item, W["dl_run_btn"],  enabled=True)
+            _ui(dpg.configure_item, W["dl_stop_btn"], enabled=False)
+
+    threading.Thread(target=_do, daemon=True).start()
+
+
+def _build_download_tab():
+    dpg.add_text("Baixar Música", color=list(ACCENT))
+    dpg.add_separator()
+    dpg.add_spacer(height=6)
+
+    # ── Aviso de instalação ───────────────────────────────────────────
+    with dpg.group(horizontal=True, show=not bool(_find_ytdlp())) as _warn:
+        dpg.add_text("  yt-dlp não encontrado.", color=list(YELLOW))
+        dpg.add_spacer(width=10)
+        W["dl_install_btn"] = dpg.add_button(
+            label=" Instalar yt-dlp ", callback=lambda *_: _dl_install_ytdlp(),
+        )
+    W["dl_ytdlp_warn"] = _warn
+    dpg.add_spacer(height=4)
+
+    # ── Pesquisa YouTube ──────────────────────────────────────────────
+    with dpg.collapsing_header(label="  Pesquisar no YouTube", default_open=True):
+        dpg.add_spacer(height=6)
+        with dpg.group(horizontal=True):
+            W["dl_search_input"] = dpg.add_input_text(
+                width=-120, hint="nome da música, artista...",
+                on_enter=True, callback=lambda *_: _run_search(),
+            )
+            W["dl_search_btn"] = dpg.add_button(
+                label=" Pesquisar ", callback=lambda *_: _run_search(),
+            )
+        dpg.add_spacer(height=4)
+        W["dl_search_status"] = dpg.add_text("", color=list(DIM))
+        dpg.add_spacer(height=4)
+        W["dl_search_table_container"] = dpg.add_group()
+
+    dpg.add_spacer(height=8)
+
+    # ── Baixar por URL ────────────────────────────────────────────────
+    with dpg.collapsing_header(label="  Baixar por URL", default_open=True) as _url_sec:
+        dpg.add_spacer(height=6)
+        dpg.add_text(
+            "Suporta YouTube, SoundCloud, Bandcamp e centenas de outros sites."
+            " Playlists são detectadas automaticamente pela URL.",
+            color=list(DIM), wrap=700,
+        )
+        dpg.add_spacer(height=8)
+
+        with dpg.group(horizontal=True):
+            dpg.add_text("URL:", color=list(DIM))
+            W["dl_url"] = dpg.add_input_text(
+                width=-80, hint="https://youtube.com/watch?v=...",
+            )
+            dpg.add_button(label=" Colar ", callback=lambda *_: _dl_paste_url())
+
+        dpg.add_spacer(height=8)
+
+        with dpg.group(horizontal=True):
+            dpg.add_text("Tipo:", color=list(DIM))
+            W["dl_type"] = dpg.add_radio_button(
+                items=["Áudio", "Vídeo"],
+                default_value="Áudio",
+                horizontal=True,
+                callback=lambda *_: _dl_update_format_visibility(),
+            )
+            dpg.add_spacer(width=24)
+            W["dl_playlist"] = dpg.add_checkbox(
+                label="Baixar playlist completa", default_value=True,
+            )
+
+        dpg.add_spacer(height=6)
+
+        with dpg.group(horizontal=True) as _ag:
+            dpg.add_text("Formato:", color=list(DIM))
+            W["dl_audio_fmt"] = dpg.add_combo(
+                items=["mp3", "m4a", "flac", "wav", "opus"],
+                default_value="mp3", width=90,
+            )
+            dpg.add_spacer(width=16)
+            dpg.add_text("Qualidade:", color=list(DIM))
+            W["dl_audio_quality"] = dpg.add_combo(
+                items=["Melhor (320k)", "Alta (256k)", "Média (192k)", "Baixa (128k)"],
+                default_value="Melhor (320k)", width=150,
+            )
+        W["dl_audio_grp"] = _ag
+
+        with dpg.group(horizontal=True, show=False) as _vg:
+            dpg.add_text("Formato:", color=list(DIM))
+            W["dl_video_fmt"] = dpg.add_combo(
+                items=["mp4", "webm", "mkv"],
+                default_value="mp4", width=90,
+            )
+            dpg.add_spacer(width=16)
+            dpg.add_text("Qualidade:", color=list(DIM))
+            W["dl_video_quality"] = dpg.add_combo(
+                items=["Melhor", "1080p", "720p", "480p", "360p"],
+                default_value="Melhor", width=110,
+            )
+        W["dl_video_grp"] = _vg
+
+        dpg.add_spacer(height=6)
+
+        with dpg.group(horizontal=True):
+            dpg.add_button(
+                label=" Pasta destino ", callback=lambda *_: _dl_pick_folder(),
+            )
+            W["dl_dest_text"] = dpg.add_text(_dl_dest_folder, color=list(DIM))
+
+        dpg.add_spacer(height=10)
+
+        with dpg.group(horizontal=True):
+            W["dl_run_btn"]  = dpg.add_button(
+                label="  Baixar  ", callback=lambda *_: _run_download(),
+            )
+            W["dl_stop_btn"] = dpg.add_button(
+                label="  Parar  ", callback=lambda *_: _stop_download(), enabled=False,
+            )
+
+        dpg.add_spacer(height=8)
+        W["dl_status"]   = dpg.add_text("", color=list(DIM))
+        W["dl_progress"] = dpg.add_progress_bar(default_value=0.0, width=-1)
+        dpg.add_spacer(height=6)
+
+        dpg.add_text("Log:", color=list(DIM))
+        W["dl_log"] = dpg.add_input_text(
+            multiline=True, readonly=True, width=-1, height=200,
+            default_value="",
+        )
+    W["dl_url_section"] = _url_sec
+
+
 # ── Auto-tagging ──────────────────────────────────────────────────────
 def _open_tag_target():
     def _pick():
@@ -719,16 +1219,16 @@ def _apply_tag_table(results: list[dict], dry_run: bool):
             if tex:
                 dpg.add_image(tex, parent=row, width=48, height=48)
             else:
-                dpg.add_text("✓" if r.get("cover_written") else "img?", parent=row, color=list(GREEN))
+                dpg.add_text("OK" if r.get("cover_written") else "img?", parent=row, color=list(GREEN))
         elif r.get("cover_written"):
-            dpg.add_text("✓", parent=row, color=list(GREEN))
+            dpg.add_text("OK", parent=row, color=list(GREEN))
         else:
             dpg.add_text("—", parent=row, color=list(DIM))
 
         if r.get("error") and not r.get("written"):
             dpg.add_text(r["error"][:30], parent=row, color=list(RED))
         elif r.get("written"):
-            label = "preview" if dry_run else "✓"
+            label = "preview" if dry_run else "OK"
             dpg.add_text(label, parent=row, color=list(YELLOW if dry_run else GREEN))
         else:
             dpg.add_text("—", parent=row, color=list(DIM))
@@ -1027,6 +1527,11 @@ def launch():
             with dpg.tab(label="  Tagar  "):
                 with dpg.child_window(border=False):
                     _build_tag_tab()
+
+            # ── Baixar ──────────────────────────────────────────────
+            with dpg.tab(label="  Baixar  "):
+                with dpg.child_window(border=False):
+                    _build_download_tab()
 
     dpg.create_viewport(title="Music Analyzer", width=1280, height=800,
                         min_width=960, min_height=620)
