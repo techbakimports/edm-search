@@ -48,6 +48,8 @@ _batch_folder:  str | None = None
 _dl_process:      "subprocess.Popen | None" = None
 _dl_dest_folder:  str                       = os.path.expanduser("~/Downloads")
 _dl_log_lines:    list                      = []
+_train_log_lines: list[str]                 = []
+_audit_results:   list[dict]                = []
 _dl_search_results: list                    = []
 
 # ── Paleta — neon green + purple ─────────────────────────────────────
@@ -62,6 +64,8 @@ YELLOW   = (255, 200,  50, 255)   # destaques (BPM etc.)
 GREEN    = (100, 255, 145, 255)   # verde suave — secundário
 BLUE     = (130, 100, 255, 255)   # azul-roxo
 PURPLE   = (200, 145, 255, 255)   # roxo suave
+
+_WAVE_N = 512  # pontos da waveform (resolução do envelope)
 
 # Gradiente do espectro: roxo (sub-bass) → verde neon (altos)
 _SPEC_COLORS = [
@@ -222,6 +226,7 @@ def _analyze(slot: str, path: str):
         _ui(_apply_results, slot, f, c)
         _ui(_apply_spectrum, slot, f)
         _ui(_check_compare_ready)
+        threading.Thread(target=_compute_waveform, args=(slot, path), daemon=True).start()
         _ui(dpg.configure_item, W[f"btn_vis_{slot}"],     enabled=True)
         _ui(dpg.configure_item, W[f"btn_exp_csv_{slot}"], enabled=True)
         _ui(dpg.configure_item, W[f"btn_exp_json_{slot}"], enabled=True)
@@ -294,8 +299,8 @@ def _apply_spectrum(slot: str, f: dict):
     e_mid  = f.get("energy_mid", 0)
     e_high = f.get("energy_high", 0)
     vals   = [e_sub, e_bass, e_mid*0.4, e_mid*0.6, e_high*0.6, e_high*0.4]
-    labels = ["Sub-bass 20–80Hz", "Bass 80–300Hz", "Low-mid 300–1kHz",
-              "Mid 1–3kHz", "High-mid 3–8kHz", "High 8–16kHz"]
+    labels = ["Sub-bass 20-80Hz", "Bass 80-300Hz", "Low-mid 300-1kHz",
+              "Mid 1-3kHz", "High-mid 3-8kHz", "High 8-16kHz"]
     max_val = max(vals) or 1.0
 
     for i, (val, label) in enumerate(zip(vals, labels)):
@@ -303,15 +308,34 @@ def _apply_spectrum(slot: str, f: dict):
         dpg.set_value(W[f"bar_{slot}_{i}"],    ratio)
         dpg.set_value(W[f"barlbl_{slot}_{i}"], f"{label}  {ratio:.0%}")
 
-    envelope = f.get("rms_envelope")
-    if envelope:
-        samples = [float(v) for v in envelope]
-    else:
-        rng = np.random.default_rng(seed=42)
-        samples = [float(v) for v in np.clip(
-            rng.normal(f.get("rms_mean", 0.01), f.get("rms_std", 0.005) * 0.5, 80), 0, None
-        )]
-    dpg.set_value(W[f"wave_{slot}"], [list(range(len(samples))), samples])
+    # espectrograma calculado em thread separada por _compute_spectrogram
+
+
+def _compute_waveform(slot: str, path: str):
+    """Calcula envelope de pico (max/min) em background e atualiza a shade_series."""
+    try:
+        import librosa
+        y, sr = librosa.load(path, sr=22050, mono=True)
+        chunk = max(len(y) // _WAVE_N, 1)
+        pos, neg = [], []
+        for i in range(_WAVE_N):
+            seg = y[i * chunk: (i + 1) * chunk]
+            if len(seg) == 0:
+                pos.append(0.0); neg.append(0.0)
+            else:
+                pos.append(float(seg.max()))
+                neg.append(float(seg.min()))
+        x = list(range(_WAVE_N))
+        _ui(_update_waveform, slot, x, pos, neg)
+    except Exception:
+        import traceback; traceback.print_exc()
+
+
+def _update_waveform(slot: str, x: list, pos: list, neg: list):
+    try:
+        dpg.set_value(W[f"wave_{slot}"], [x, pos, neg])
+    except Exception:
+        pass
 
 
 def _check_compare_ready():
@@ -1326,16 +1350,340 @@ def _build_spectrum(slot: str, color):
 
     dpg.add_spacer(height=8)
     dpg.add_text("Waveform", color=list(DIM))
-    with dpg.plot(height=90, width=-1, no_title=True, no_mouse_pos=True) as _plot:
-        dpg.add_plot_axis(dpg.mvXAxis,
-                          no_gridlines=True, no_tick_marks=True, no_tick_labels=True)
-        with dpg.plot_axis(dpg.mvYAxis,
-                           no_gridlines=True, no_tick_marks=True, no_tick_labels=True):
-            W[f"wave_{slot}"] = dpg.add_line_series([], [])
+    _x0 = list(range(_WAVE_N))
+    _y0 = [0.0] * _WAVE_N
+    with dpg.plot(height=100, width=-1, no_title=True, no_mouse_pos=True) as _plot:
+        W[f"wave_xax_{slot}"] = dpg.add_plot_axis(
+            dpg.mvXAxis,
+            no_gridlines=True, no_tick_marks=True, no_tick_labels=True,
+        )
+        with dpg.plot_axis(
+            dpg.mvYAxis,
+            no_gridlines=True, no_tick_marks=True, no_tick_labels=True,
+        ) as _yax:
+            W[f"wave_{slot}"] = dpg.add_shade_series(_x0, _y0, y2=_y0)
+            W[f"wave_yax_{slot}"] = _yax
+    dpg.set_axis_limits(W[f"wave_xax_{slot}"], 0, _WAVE_N - 1)
+    dpg.set_axis_limits(W[f"wave_yax_{slot}"], -1.0, 1.0)
     with dpg.theme() as _pt:
-        with dpg.theme_component(dpg.mvLineSeries):
-            dpg.add_theme_color(dpg.mvPlotCol_Line, ACCENT, category=dpg.mvThemeCat_Plots)
+        with dpg.theme_component(dpg.mvShadeSeries):
+            dpg.add_theme_color(dpg.mvPlotCol_Fill, (86, 156, 214, 160),
+                                category=dpg.mvThemeCat_Plots)
+            dpg.add_theme_color(dpg.mvPlotCol_Line, (140, 195, 250, 220),
+                                category=dpg.mvThemeCat_Plots)
     dpg.bind_item_theme(_plot, _pt)
+
+
+# ── Aba Treinar ───────────────────────────────────────────────────────
+
+def _train_log_append(msg: str):
+    global _train_log_lines
+    _train_log_lines.append(msg)
+    if len(_train_log_lines) > 300:
+        _train_log_lines = _train_log_lines[-300:]
+    dpg.set_value(W["train_log"], "\n".join(_train_log_lines))
+
+
+def _train_update_model_info():
+    if os.path.exists("model.pkl"):
+        import time
+        mtime = os.path.getmtime("model.pkl")
+        ts    = time.strftime("%d/%m/%Y %H:%M", time.localtime(mtime))
+        dpg.set_value(W["train_model_info"], f"model.pkl encontrado  ({ts})")
+        dpg.configure_item(W["audit_btn"], enabled=True)
+    else:
+        dpg.set_value(W["train_model_info"], "model.pkl nao encontrado")
+        dpg.configure_item(W["audit_btn"], enabled=False)
+
+
+def _run_train_thread(dataset_dir: str, n_estimators: int):
+    global _train_log_lines
+    from trainer import scan_dataset, NUMERIC_FEATURES
+    try:
+        from sklearn.ensemble import RandomForestClassifier
+        from sklearn.preprocessing import StandardScaler
+        from sklearn.model_selection import cross_val_score
+        import pickle
+    except ImportError as e:
+        _ui(_train_log_append, f"Dependencia ausente: {e}  (pip install scikit-learn)")
+        _ui(dpg.configure_item, W["train_btn"], enabled=True)
+        return
+
+    def log(msg):
+        _ui(_train_log_append, msg)
+
+    try:
+        _ui(dpg.configure_item, W["train_btn"], enabled=False)
+        _train_log_lines.clear()
+        _ui(dpg.set_value, W["train_log"], "")
+        _ui(dpg.set_value, W["train_status"], "Escaneando dataset...")
+
+        items = scan_dataset(dataset_dir)
+        if not items:
+            log("Nenhuma faixa encontrada. Verifique a estrutura: genre/subgenre/arquivo.mp3")
+            _ui(dpg.set_value, W["train_status"], "Dataset vazio.")
+            return
+
+        log(f"{len(items)} faixas encontradas.")
+        X, y_labels, errors = [], [], 0
+
+        for i, (path, genre, subgenre) in enumerate(items):
+            _ui(dpg.set_value, W["train_status"], f"Extraindo features... {i+1}/{len(items)}")
+            try:
+                features = analyze_file(path)
+                X.append([features.get(k, 0) for k in NUMERIC_FEATURES])
+                y_labels.append(f"{genre}|{subgenre}")
+            except Exception as e:
+                errors += 1
+                log(f"  Erro: {os.path.basename(path)}: {e}")
+
+        if errors:
+            log(f"{errors} faixas com erro ignoradas.")
+
+        if len(X) < 10:
+            log("Dados insuficientes (minimo 10 faixas validas).")
+            _ui(dpg.set_value, W["train_status"], "Dados insuficientes.")
+            return
+
+        X_arr = np.array(X)
+        y_arr = np.array(y_labels)
+        n_classes = len(set(y_labels))
+
+        _ui(dpg.set_value, W["train_status"], "Normalizando e validando...")
+        scaler   = StandardScaler()
+        X_scaled = scaler.fit_transform(X_arr)
+
+        model  = RandomForestClassifier(n_estimators=n_estimators, random_state=42, n_jobs=-1)
+        cv     = min(5, n_classes)
+        scores = cross_val_score(model, X_scaled, y_arr, cv=cv)
+        acc    = f"Acuracia {cv}-fold: {scores.mean():.1%} +/- {scores.std():.1%}"
+        log(acc)
+
+        _ui(dpg.set_value, W["train_status"], "Treinando modelo final...")
+        model.fit(X_scaled, y_arr)
+
+        bundle = {
+            'model': model, 'scaler': scaler,
+            'feature_names': NUMERIC_FEATURES,
+            'label_names': model.classes_.tolist(),
+        }
+        with open('model.pkl', 'wb') as f:
+            pickle.dump(bundle, f)
+
+        log(f"Modelo salvo: model.pkl")
+        log(f"Generos treinados: {n_classes}")
+        for g in sorted(set(y_labels)):
+            log(f"  - {g.replace('|', ' / ')}")
+
+        _ui(dpg.set_value, W["train_status"], f"Concluido. {acc}")
+        _ui(_train_update_model_info)
+
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        log(f"Erro: {e}")
+        _ui(dpg.set_value, W["train_status"], f"Erro: {e}")
+    finally:
+        _ui(dpg.configure_item, W["train_btn"], enabled=True)
+
+
+def _run_audit_thread(dataset_dir: str, threshold: float):
+    global _audit_results
+    from trainer import scan_dataset
+    from classifier import classify_ml
+    try:
+        _ui(dpg.configure_item, W["audit_btn"], enabled=False)
+        _ui(dpg.set_value, W["audit_status"], "Escaneando dataset...")
+
+        items = scan_dataset(dataset_dir)
+        if not items:
+            _ui(dpg.set_value, W["audit_status"], "Nenhuma faixa encontrada no dataset.")
+            return
+
+        suspects, errors = [], 0
+        for i, (path, genre, subgenre) in enumerate(items):
+            _ui(dpg.set_value, W["audit_status"], f"Analisando... {i+1}/{len(items)}")
+            try:
+                features   = analyze_file(path)
+                ml_results = classify_ml(features)
+                if ml_results:
+                    top  = ml_results[0]
+                    conf = top['score']
+                    if (top['genre'] != genre or top['subgenre'] != subgenre) and conf >= threshold:
+                        suspects.append({
+                            'file':              os.path.basename(path),
+                            'path':              path,
+                            'declared_genre':    genre,
+                            'declared_subgenre': subgenre,
+                            'model_genre':       top['genre'],
+                            'model_subgenre':    top['subgenre'],
+                            'confidence':        conf,
+                        })
+            except Exception:
+                errors += 1
+
+        _audit_results = suspects
+        _ui(_apply_audit_table, suspects, len(items), errors)
+
+    except Exception as e:
+        _ui(dpg.set_value, W["audit_status"], f"Erro: {e}")
+    finally:
+        _ui(dpg.configure_item, W["audit_btn"], enabled=True)
+
+
+def _apply_audit_table(suspects: list, total: int, errors: int):
+    prev = W.get("audit_table")
+    if prev and dpg.does_item_exist(prev):
+        dpg.delete_item(prev)
+
+    msg = f"{len(suspects)} suspeito(s) de {total} faixas"
+    if errors:
+        msg += f"  ({errors} com erro)"
+    dpg.set_value(W["audit_status"], msg)
+    dpg.configure_item(W["audit_export_btn"], enabled=bool(suspects))
+
+    if not suspects:
+        return
+
+    container = W["audit_table_container"]
+    with dpg.table(
+        header_row=True, borders_innerH=True, borders_outerH=True,
+        borders_outerV=True, row_background=True, width=-1,
+        parent=container,
+    ) as tbl:
+        W["audit_table"] = tbl
+        dpg.add_table_column(label="Arquivo",       width_fixed=True, init_width_or_weight=220)
+        dpg.add_table_column(label="Pasta (declarado)", width_fixed=True, init_width_or_weight=200)
+        dpg.add_table_column(label="Modelo diz",    width_fixed=True, init_width_or_weight=200)
+        dpg.add_table_column(label="Confianca",     width_fixed=True, init_width_or_weight=80)
+        for s in suspects:
+            with dpg.table_row():
+                dpg.add_text(s['file'],           color=list(WHITE))
+                dpg.add_text(f"{s['declared_genre']} / {s['declared_subgenre']}", color=list(DIM))
+                dpg.add_text(f"{s['model_genre']} / {s['model_subgenre']}",       color=list(YELLOW))
+                dpg.add_text(f"{s['confidence']:.0%}", color=list(ACCENT))
+
+
+def _export_audit():
+    if not _audit_results:
+        return
+    path = _win_save_file("Exportar auditoria", "CSV\0*.csv\0", "csv")
+    if not path:
+        return
+    import csv as _csv
+    with open(path, 'w', newline='', encoding='utf-8') as fp:
+        writer = _csv.DictWriter(fp, fieldnames=list(_audit_results[0].keys()))
+        writer.writeheader()
+        writer.writerows(_audit_results)
+    dpg.set_value(W["audit_status"], f"Exportado: {os.path.basename(path)}")
+
+
+def _build_train_tab():
+    dpg.add_text("Treinar Modelo ML", color=list(ACCENT))
+    dpg.add_separator()
+    dpg.add_spacer(height=6)
+    dpg.add_text(
+        "Estrutura do dataset esperada:  dataset/Genero/Subgenero/arquivo.mp3",
+        color=list(DIM), wrap=750,
+    )
+    dpg.add_spacer(height=8)
+
+    # Dataset e estimators
+    with dpg.group(horizontal=True):
+        dpg.add_text("Dataset:", color=list(DIM))
+        W["train_folder_text"] = dpg.add_input_text(
+            hint="Pasta raiz do dataset", width=420, readonly=True,
+        )
+        dpg.add_button(label=" Selecionar ",
+                       callback=lambda: threading.Thread(
+                           target=lambda: _ui(dpg.set_value, W["train_folder_text"],
+                                              _win_open_folder("Selecionar dataset") or
+                                              dpg.get_value(W["train_folder_text"])),
+                           daemon=True).start())
+
+    dpg.add_spacer(height=6)
+    with dpg.group(horizontal=True):
+        dpg.add_text("Arvores (estimators):", color=list(DIM))
+        W["train_estimators"] = dpg.add_slider_int(
+            min_value=50, max_value=500, default_value=200, width=200,
+        )
+        dpg.add_text("(mais = mais preciso, mais lento)", color=list(DIM))
+
+    dpg.add_spacer(height=8)
+    with dpg.group(horizontal=True):
+        W["train_btn"] = dpg.add_button(
+            label="  Treinar  ",
+            callback=lambda: threading.Thread(
+                target=_run_train_thread,
+                args=(dpg.get_value(W["train_folder_text"]),
+                      dpg.get_value(W["train_estimators"])),
+                daemon=True,
+            ).start() if dpg.get_value(W["train_folder_text"]) else None,
+        )
+        dpg.add_spacer(width=16)
+        W["train_model_info"] = dpg.add_text("", color=list(DIM))
+
+    dpg.add_spacer(height=4)
+    W["train_status"] = dpg.add_text("", color=list(DIM))
+    dpg.add_spacer(height=4)
+    W["train_log"] = dpg.add_input_text(
+        multiline=True, readonly=True, width=-1, height=160,
+        default_value="",
+    )
+
+    dpg.add_spacer(height=16)
+    dpg.add_text("Auditar Dataset", color=list(ACCENT2))
+    dpg.add_separator()
+    dpg.add_spacer(height=6)
+    dpg.add_text(
+        "Analisa cada faixa com o modelo e lista suspeitos de rótulo errado (alta confiança + discordância).",
+        color=list(DIM), wrap=750,
+    )
+    dpg.add_spacer(height=8)
+
+    with dpg.group(horizontal=True):
+        dpg.add_text("Dataset:", color=list(DIM))
+        W["audit_folder_text"] = dpg.add_input_text(
+            hint="Mesma pasta do treino", width=420, readonly=True,
+        )
+        dpg.add_button(label=" Selecionar ",
+                       callback=lambda: threading.Thread(
+                           target=lambda: _ui(dpg.set_value, W["audit_folder_text"],
+                                              _win_open_folder("Selecionar dataset") or
+                                              dpg.get_value(W["audit_folder_text"])),
+                           daemon=True).start())
+
+    dpg.add_spacer(height=6)
+    with dpg.group(horizontal=True):
+        dpg.add_text("Confianca minima:", color=list(DIM))
+        W["audit_threshold"] = dpg.add_slider_float(
+            min_value=0.5, max_value=1.0, default_value=0.8,
+            format="%.2f", width=200,
+        )
+        dpg.add_text("(so reporta se o modelo tiver alta certeza)", color=list(DIM))
+
+    dpg.add_spacer(height=8)
+    with dpg.group(horizontal=True):
+        W["audit_btn"] = dpg.add_button(
+            label="  Auditar  ",
+            callback=lambda: threading.Thread(
+                target=_run_audit_thread,
+                args=(dpg.get_value(W["audit_folder_text"]),
+                      dpg.get_value(W["audit_threshold"])),
+                daemon=True,
+            ).start() if dpg.get_value(W["audit_folder_text"]) else None,
+            enabled=False,
+        )
+        dpg.add_spacer(width=8)
+        W["audit_export_btn"] = dpg.add_button(
+            label=" Exportar CSV ", callback=_export_audit, enabled=False,
+        )
+
+    dpg.add_spacer(height=4)
+    W["audit_status"] = dpg.add_text("", color=list(DIM))
+    dpg.add_spacer(height=6)
+    W["audit_table_container"] = dpg.add_group()
+
+    _train_update_model_info()
 
 
 def _build_compare_table():
@@ -1532,6 +1880,11 @@ def launch():
             with dpg.tab(label="  Baixar  "):
                 with dpg.child_window(border=False):
                     _build_download_tab()
+
+            # ── Treinar ─────────────────────────────────────────────
+            with dpg.tab(label="  Treinar  "):
+                with dpg.child_window(border=False):
+                    _build_train_tab()
 
     dpg.create_viewport(title="Music Analyzer", width=1280, height=800,
                         min_width=960, min_height=620)

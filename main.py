@@ -479,6 +479,99 @@ def tag_command(target: str, dry_run: bool, no_year: bool, no_cover: bool, no_ge
         console.print("[dim]  Dica: use --no-year para pular a busca online se estiver offline.[/dim]")
 
 
+def audit_command(dataset_dir: str, threshold: float = 0.8, export_fmt: str = None):
+    """Percorre o dataset, classifica com ML e reporta discordâncias de alta confiança."""
+    if not os.path.exists('model.pkl'):
+        console.print("[red]model.pkl não encontrado. Treine primeiro:[/red]")
+        console.print("[dim]  python trainer.py --dataset <pasta>[/dim]")
+        sys.exit(1)
+
+    from trainer import scan_dataset
+    from classifier import classify_ml
+
+    items = scan_dataset(dataset_dir)
+    if not items:
+        console.print("[red]Nenhuma faixa encontrada no dataset.[/red]")
+        return
+
+    console.print(f"[cyan]Auditando {len(items)} faixas (confiança mínima: {threshold:.0%})...[/cyan]\n")
+
+    suspects, errors = [], 0
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[cyan]{task.description}"),
+        BarColumn(),
+        TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+        console=console,
+    ) as progress:
+        task = progress.add_task("Auditando...", total=len(items))
+        for path, genre, subgenre in items:
+            progress.update(task, description=os.path.basename(path))
+            try:
+                features  = analyze_file(path)
+                ml_results = classify_ml(features)
+                if ml_results:
+                    top  = ml_results[0]
+                    conf = top['score']
+                    if (top['genre'] != genre or top['subgenre'] != subgenre) and conf >= threshold:
+                        suspects.append({
+                            'file':              os.path.basename(path),
+                            'path':              path,
+                            'declared_genre':    genre,
+                            'declared_subgenre': subgenre,
+                            'model_genre':       top['genre'],
+                            'model_subgenre':    top['subgenre'],
+                            'confidence':        conf,
+                        })
+            except Exception:
+                errors += 1
+            progress.advance(task)
+
+    console.print()
+
+    if not suspects:
+        console.print(f"[green]Nenhuma discordância acima de {threshold:.0%}.[/green]")
+        if errors:
+            console.print(f"[yellow]{errors} arquivo(s) com erro.[/yellow]")
+        return
+
+    table = Table(
+        title=f"Suspeitos de rótulo errado — {len(suspects)} de {len(items)} faixas",
+        box=box.ROUNDED, border_style="yellow",
+    )
+    table.add_column("Arquivo",          style="white",  max_width=38)
+    table.add_column("Pasta (declarado)", style="dim",   max_width=24)
+    table.add_column("Modelo diz",        style="yellow", max_width=24)
+    table.add_column("Confiança",         style="cyan",  justify="right", width=10)
+
+    for s in suspects:
+        table.add_row(
+            s['file'],
+            f"{s['declared_genre']} / {s['declared_subgenre']}",
+            f"{s['model_genre']} / {s['model_subgenre']}",
+            f"{s['confidence']:.0%}",
+        )
+
+    console.print(table)
+
+    if errors:
+        console.print(f"\n[yellow]{errors} arquivo(s) com erro foram ignorados.[/yellow]")
+
+    if export_fmt:
+        ts      = datetime.now().strftime('%Y%m%d_%H%M%S')
+        out     = os.path.join(dataset_dir, f"audit_{ts}.{export_fmt}")
+        if export_fmt == 'csv':
+            with open(out, 'w', newline='', encoding='utf-8') as fp:
+                writer = csv.DictWriter(fp, fieldnames=list(suspects[0].keys()))
+                writer.writeheader()
+                writer.writerows(suspects)
+        elif export_fmt == 'json':
+            with open(out, 'w', encoding='utf-8') as fp:
+                json.dump(suspects, fp, ensure_ascii=False, indent=2)
+        console.print(f"[green]Relatório exportado: {out}[/green]")
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Music Analyzer — Identificação de BPM e gêneros musicais.",
@@ -486,20 +579,33 @@ def main():
         epilog=__doc__,
     )
     parser.add_argument('input', nargs='?', help="Arquivo de áudio ou pasta")
-    parser.add_argument('--plot',    action='store_true', help="Exibe visualização gráfica")
-    parser.add_argument('--export',  choices=['csv', 'json'], help="Exporta resultados (pasta)")
-    parser.add_argument('--compare', nargs=2, metavar=('ARQUIVO1', 'ARQUIVO2'), help="Compara duas músicas")
-    parser.add_argument('--gui',     action='store_true', help="Abre a interface gráfica")
-    parser.add_argument('--tag',      metavar='CAMINHO', help="Taga arquivos pelo nome do arquivo")
-    parser.add_argument('--dry-run',  action='store_true', help="Com --tag: pré-visualiza sem gravar")
-    parser.add_argument('--no-year',  action='store_true', help="Com --tag: não busca ano na internet")
-    parser.add_argument('--no-cover', action='store_true', help="Com --tag: não baixa capa automática")
-    parser.add_argument('--no-genre', action='store_true', help="Com --tag: não busca gênero automaticamente")
+    parser.add_argument('--plot',       action='store_true', help="Exibe visualização gráfica")
+    parser.add_argument('--export',     choices=['csv', 'json'], help="Exporta resultados")
+    parser.add_argument('--compare',    nargs=2, metavar=('ARQUIVO1', 'ARQUIVO2'), help="Compara duas músicas")
+    parser.add_argument('--gui',        action='store_true', help="Abre a interface gráfica")
+    parser.add_argument('--tag',        metavar='CAMINHO', help="Taga arquivos pelo nome do arquivo")
+    parser.add_argument('--dry-run',    action='store_true', help="Com --tag: pré-visualiza sem gravar")
+    parser.add_argument('--no-year',    action='store_true', help="Com --tag: não busca ano na internet")
+    parser.add_argument('--no-cover',   action='store_true', help="Com --tag: não baixa capa automática")
+    parser.add_argument('--no-genre',   action='store_true', help="Com --tag: não busca gênero automaticamente")
+    parser.add_argument('--train',      metavar='DATASET', help="Treina o modelo ML com o dataset (genre/subgenre/arquivo)")
+    parser.add_argument('--audit',      metavar='DATASET', help="Audita dataset: detecta faixas possivelmente mal rotuladas")
+    parser.add_argument('--threshold',  type=float, default=0.8, help="Com --audit: confiança mínima (padrão: 0.8)")
+    parser.add_argument('--estimators', type=int,   default=200, help="Com --train: número de árvores no Random Forest")
     args = parser.parse_args()
 
     if args.gui:
         from gui import launch
         launch()
+        return
+
+    if args.train:
+        from trainer import train
+        train(args.train, output_path='model.pkl', n_estimators=args.estimators)
+        return
+
+    if args.audit:
+        audit_command(args.audit, threshold=args.threshold, export_fmt=args.export)
         return
 
     if args.tag:
