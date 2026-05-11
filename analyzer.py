@@ -12,16 +12,38 @@ from config import SUPPORTED_FORMATS
 
 @contextlib.contextmanager
 def _silent_stderr():
-    """Suprime saída C-level no stderr (ex: avisos do mpg123 sobre tags ID3 malformadas)."""
+    """Suprime saída C-level no stderr (avisos do mpg123 sobre tags ID3 malformadas).
+    No Windows redireciona tanto o fd POSIX quanto o handle Win32."""
     devnull_fd = os.open(os.devnull, os.O_WRONLY)
     old_fd = os.dup(2)
     os.dup2(devnull_fd, 2)
+
+    # Windows: algumas libs C escrevem via SetStdHandle, não pelo fd POSIX
+    _win_old_handle = None
+    _win_devnull = None
+    try:
+        import ctypes
+        STD_ERROR_HANDLE = -12
+        k32 = ctypes.windll.kernel32
+        _win_old_handle = k32.GetStdHandle(STD_ERROR_HANDLE)
+        _win_devnull = k32.CreateFileW('nul', 0x40000000, 0, None, 3, 0, None)
+        k32.SetStdHandle(STD_ERROR_HANDLE, _win_devnull)
+    except Exception:
+        pass
+
     try:
         yield
     finally:
         os.dup2(old_fd, 2)
         os.close(old_fd)
         os.close(devnull_fd)
+        try:
+            if _win_old_handle is not None:
+                ctypes.windll.kernel32.SetStdHandle(-12, _win_old_handle)
+            if _win_devnull is not None:
+                ctypes.windll.kernel32.CloseHandle(_win_devnull)
+        except Exception:
+            pass
 
 
 def load_audio(path: str, duration: float = 60.0):
@@ -30,15 +52,16 @@ def load_audio(path: str, duration: float = 60.0):
     if ext not in SUPPORTED_FORMATS:
         raise ValueError(f"Formato não suportado: {ext}. Suportados: {SUPPORTED_FORMATS}")
 
-    total_duration = librosa.get_duration(path=path)
-    # Pula o início (intro) e analisa o meio da faixa
-    offset = max(0, (total_duration / 2) - (duration / 2))
-    offset = min(offset, max(0, total_duration - duration))
-
-    # sr=22050 é o padrão do librosa: reduz memória pela metade vs 44100 Hz
-    # _silent_stderr suprime avisos C-level do mpg123 sobre frames ID3 malformados
     with _silent_stderr():
+        total_duration = librosa.get_duration(path=path)
+        offset = max(0, (total_duration / 2) - (duration / 2))
+        offset = min(offset, max(0, total_duration - duration))
         y, sr = librosa.load(path, sr=22050, offset=offset, duration=duration, mono=True)
+        # MP3s VBR sem cabeçalho Xing não suportam seek — tenta do início se retornou vazio
+        if len(y) == 0:
+            y, sr = librosa.load(path, sr=22050, offset=0, duration=duration, mono=True)
+    if len(y) == 0:
+        raise ValueError("audio vazio ou corrompido")
     return y, sr, total_duration
 
 

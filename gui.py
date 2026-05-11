@@ -49,6 +49,7 @@ _dl_process:      "subprocess.Popen | None" = None
 _dl_dest_folder:  str                       = os.path.expanduser("~/Downloads")
 _dl_log_lines:    list                      = []
 _train_log_lines: list[str]                 = []
+_train_stop_flag: threading.Event          = threading.Event()
 _audit_results:   list[dict]                = []
 _dl_search_results: list                    = []
 
@@ -1396,9 +1397,20 @@ def _train_update_model_info():
         dpg.configure_item(W["audit_btn"], enabled=False)
 
 
+CHECKPOINT_INTERVAL = 50  # salva progresso a cada N faixas
+
+
+def _on_train_restart():
+    from trainer import clear_checkpoint, CHECKPOINT_PATH
+    clear_checkpoint()
+    _train_log_lines.clear()
+    dpg.set_value(W["train_log"], "")
+    dpg.set_value(W["train_status"], "Checkpoint removido. Pronto para recomecar do zero.")
+
+
 def _run_train_thread(dataset_dir: str, n_estimators: int):
-    global _train_log_lines
-    from trainer import scan_dataset, NUMERIC_FEATURES
+    global _train_log_lines, _train_stop_flag
+    from trainer import scan_dataset, NUMERIC_FEATURES, save_checkpoint, load_checkpoint, clear_checkpoint
     try:
         from sklearn.ensemble import RandomForestClassifier
         from sklearn.preprocessing import StandardScaler
@@ -1413,22 +1425,46 @@ def _run_train_thread(dataset_dir: str, n_estimators: int):
         _ui(_train_log_append, msg)
 
     try:
+        _train_stop_flag.clear()
         _ui(dpg.configure_item, W["train_btn"], enabled=False)
+        _ui(dpg.configure_item, W["train_pause_btn"], enabled=True)
+        _ui(dpg.configure_item, W["train_restart_btn"], enabled=False)
         _train_log_lines.clear()
         _ui(dpg.set_value, W["train_log"], "")
-        _ui(dpg.set_value, W["train_status"], "Escaneando dataset...")
+        _ui(dpg.set_value, W["train_status"], "Verificando checkpoint...")
 
-        items = scan_dataset(dataset_dir)
-        if not items:
-            log("Nenhuma faixa encontrada. Verifique a estrutura: genre/subgenre/arquivo.mp3")
-            _ui(dpg.set_value, W["train_status"], "Dataset vazio.")
-            return
+        ckpt = load_checkpoint(dataset_dir)
+        if ckpt:
+            items      = ckpt['items']
+            done_paths = ckpt['done_paths']
+            X          = ckpt['X']
+            y_labels   = ckpt['y_labels']
+            errors     = ckpt['errors']
+            log(f"Retomando checkpoint: {len(done_paths)} processadas ({len(X)} ok, {errors} erros) de {len(items)}. Restam {len(items) - len(done_paths)}.")
+        else:
+            _ui(dpg.set_value, W["train_status"], "Escaneando dataset...")
+            items = scan_dataset(dataset_dir)
+            if not items:
+                log("Nenhuma faixa encontrada. Verifique a estrutura: genre/subgenre/arquivo.mp3")
+                _ui(dpg.set_value, W["train_status"], "Dataset vazio.")
+                return
+            log(f"{len(items)} faixas encontradas.")
+            done_paths = set()
+            X, y_labels, errors = [], [], 0
 
-        log(f"{len(items)} faixas encontradas.")
-        X, y_labels, errors = [], [], 0
+        remaining = [item for item in items if item[0] not in done_paths]
+        initial_done = len(done_paths)
 
-        for i, (path, genre, subgenre) in enumerate(items):
-            _ui(dpg.set_value, W["train_status"], f"Extraindo features... {i+1}/{len(items)}")
+        for i, (path, genre, subgenre) in enumerate(remaining):
+            if _train_stop_flag.is_set():
+                save_checkpoint(dataset_dir, items, done_paths, X, y_labels, errors)
+                total_done = initial_done + i
+                log(f"Pausado. Progresso salvo: {total_done}/{len(items)} faixas.")
+                _ui(dpg.set_value, W["train_status"], f"Pausado em {total_done}/{len(items)}. Clique Treinar para continuar.")
+                return
+
+            global_i = initial_done + i + 1
+            _ui(dpg.set_value, W["train_status"], f"Extraindo features... {global_i}/{len(items)}")
             try:
                 features = analyze_file(path)
                 X.append([features.get(k, 0) for k in NUMERIC_FEATURES])
@@ -1436,6 +1472,11 @@ def _run_train_thread(dataset_dir: str, n_estimators: int):
             except Exception as e:
                 errors += 1
                 log(f"  Erro: {os.path.basename(path)}: {e}")
+            done_paths.add(path)
+
+            if (i + 1) % CHECKPOINT_INTERVAL == 0:
+                save_checkpoint(dataset_dir, items, done_paths, X, y_labels, errors)
+                log(f"  [checkpoint salvo] {global_i}/{len(items)}")
 
         if errors:
             log(f"{errors} faixas com erro ignoradas.")
@@ -1470,6 +1511,8 @@ def _run_train_thread(dataset_dir: str, n_estimators: int):
         with open('model.pkl', 'wb') as f:
             pickle.dump(bundle, f)
 
+        clear_checkpoint()
+
         log(f"Modelo salvo: model.pkl")
         log(f"Generos treinados: {n_classes}")
         for g in sorted(set(y_labels)):
@@ -1484,6 +1527,8 @@ def _run_train_thread(dataset_dir: str, n_estimators: int):
         _ui(dpg.set_value, W["train_status"], f"Erro: {e}")
     finally:
         _ui(dpg.configure_item, W["train_btn"], enabled=True)
+        _ui(dpg.configure_item, W["train_pause_btn"], enabled=False)
+        _ui(dpg.configure_item, W["train_restart_btn"], enabled=True)
 
 
 def _run_audit_thread(dataset_dir: str, threshold: float):
@@ -1582,7 +1627,7 @@ def _build_train_tab():
     dpg.add_separator()
     dpg.add_spacer(height=6)
     dpg.add_text(
-        "Estrutura do dataset esperada:  dataset/Genero/Subgenero/arquivo.mp3",
+        "Estrutura aceita:  pasta/Genero/Subgenero/arquivo.mp3  ou  pasta/Subgenero/arquivo.mp3",
         color=list(DIM), wrap=750,
     )
     dpg.add_spacer(height=8)
@@ -1618,6 +1663,17 @@ def _build_train_tab():
                       dpg.get_value(W["train_estimators"])),
                 daemon=True,
             ).start() if dpg.get_value(W["train_folder_text"]) else None,
+        )
+        dpg.add_spacer(width=8)
+        W["train_pause_btn"] = dpg.add_button(
+            label="  Pausar  ",
+            callback=lambda: _train_stop_flag.set(),
+            enabled=False,
+        )
+        dpg.add_spacer(width=8)
+        W["train_restart_btn"] = dpg.add_button(
+            label="  Recomecar do zero  ",
+            callback=_on_train_restart,
         )
         dpg.add_spacer(width=16)
         W["train_model_info"] = dpg.add_text("", color=list(DIM))

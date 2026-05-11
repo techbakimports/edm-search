@@ -35,64 +35,137 @@ NUMERIC_FEATURES = [
 ] + [f'mfcc_{i}_mean' for i in range(1, 14)] + [f'mfcc_{i}_std' for i in range(1, 14)]
 
 
+CHECKPOINT_PATH = 'train_checkpoint.pkl'
+
+
+def save_checkpoint(dataset_dir: str, items: list, done_paths: set,
+                    X: list, y_labels: list, errors: int):
+    data = {
+        'version': 1,
+        'dataset_dir': os.path.normpath(dataset_dir),
+        'items': items,
+        'done_paths': done_paths,
+        'X': X,
+        'y_labels': y_labels,
+        'errors': errors,
+    }
+    tmp = CHECKPOINT_PATH + '.tmp'
+    with open(tmp, 'wb') as f:
+        pickle.dump(data, f)
+    os.replace(tmp, CHECKPOINT_PATH)
+
+
+def load_checkpoint(dataset_dir: str) -> dict | None:
+    if not os.path.exists(CHECKPOINT_PATH):
+        return None
+    try:
+        with open(CHECKPOINT_PATH, 'rb') as f:
+            data = pickle.load(f)
+        if data.get('version') != 1:
+            return None
+        if os.path.normpath(data.get('dataset_dir', '')) != os.path.normpath(dataset_dir):
+            return None
+        return data
+    except Exception:
+        return None
+
+
+def clear_checkpoint():
+    if os.path.exists(CHECKPOINT_PATH):
+        os.remove(CHECKPOINT_PATH)
+
+
 def scan_dataset(dataset_dir: str) -> list[tuple[str, str, str]]:
-    """Escaneia pasta e retorna [(caminho, genre, subgenre)]."""
+    """Escaneia pasta e retorna [(caminho, genre, subgenre)].
+
+    Suporta 2 ou 3 níveis automaticamente:
+      3 níveis: dataset_dir/genre/subgenre/arquivo.mp3
+      2 níveis: dataset_dir/subgenre/arquivo.mp3  (genre = nome da pasta selecionada)
+    """
     items = []
     supported = {'.mp3', '.wav', '.flac', '.ogg', '.m4a', '.aiff'}
-    for genre in os.listdir(dataset_dir):
-        genre_path = os.path.join(dataset_dir, genre)
-        if not os.path.isdir(genre_path):
+    root_name = os.path.basename(os.path.normpath(dataset_dir))
+
+    for entry in os.listdir(dataset_dir):
+        entry_path = os.path.join(dataset_dir, entry)
+        if not os.path.isdir(entry_path):
             continue
-        for subgenre in os.listdir(genre_path):
-            sub_path = os.path.join(genre_path, subgenre)
-            if not os.path.isdir(sub_path):
-                continue
-            for f in os.listdir(sub_path):
+        sub_entries = os.listdir(entry_path)
+        has_subdirs = any(os.path.isdir(os.path.join(entry_path, s)) for s in sub_entries)
+
+        if has_subdirs:
+            # 3 níveis: entry = genre, subpastas = subgenres
+            for subgenre in sub_entries:
+                sub_path = os.path.join(entry_path, subgenre)
+                if not os.path.isdir(sub_path):
+                    continue
+                for f in os.listdir(sub_path):
+                    if os.path.splitext(f)[1].lower() in supported:
+                        items.append((os.path.join(sub_path, f), entry, subgenre))
+        else:
+            # 2 níveis: root_name = genre, entry = subgenre
+            for f in sub_entries:
                 if os.path.splitext(f)[1].lower() in supported:
-                    items.append((os.path.join(sub_path, f), genre, subgenre))
+                    items.append((os.path.join(entry_path, f), root_name, entry))
     return items
 
 
-def train(dataset_dir: str, output_path: str = 'model.pkl', n_estimators: int = 200):
+def train(dataset_dir: str, output_path: str = 'model.pkl', n_estimators: int = 200,
+          checkpoint_interval: int = 50):
     from sklearn.ensemble import RandomForestClassifier
     from sklearn.preprocessing import StandardScaler
     from sklearn.model_selection import cross_val_score
 
-    items = scan_dataset(dataset_dir)
-    if not items:
-        console.print("[red]Nenhuma faixa encontrada no dataset.[/red]")
-        return
+    ckpt = load_checkpoint(dataset_dir)
+    if ckpt:
+        items      = ckpt['items']
+        done_paths = ckpt['done_paths']
+        X          = ckpt['X']
+        y_labels   = ckpt['y_labels']
+        errors     = ckpt['errors']
+        console.print(f"[yellow]Retomando checkpoint: {len(X)} faixas processadas, "
+                      f"{len(items) - len(done_paths)} restantes.[/yellow]")
+    else:
+        items = scan_dataset(dataset_dir)
+        if not items:
+            console.print("[red]Nenhuma faixa encontrada no dataset.[/red]")
+            return
+        console.print(f"[cyan]Encontradas {len(items)} faixas para treino.[/cyan]")
+        done_paths = set()
+        X, y_labels, errors = [], [], 0
 
-    console.print(f"[cyan]Encontradas {len(items)} faixas para treino.[/cyan]")
+    remaining = [item for item in items if item[0] not in done_paths]
 
-    X, y_labels = [], []
-    errors = []
-
-    for path, genre, subgenre in track(items, description="Extraindo features..."):
+    for i, (path, genre, subgenre) in enumerate(track(remaining, description="Extraindo features...")):
         try:
             features = analyze_file(path)
-            vec = [features.get(k, 0) for k in NUMERIC_FEATURES]
-            X.append(vec)
+            X.append([features.get(k, 0) for k in NUMERIC_FEATURES])
             y_labels.append(f"{genre}|{subgenre}")
         except Exception as e:
-            errors.append((path, str(e)))
+            errors += 1
+            console.print(f"[yellow]Erro em {os.path.basename(path)}: {e}[/yellow]")
+        done_paths.add(path)
+
+        if (i + 1) % checkpoint_interval == 0:
+            save_checkpoint(dataset_dir, items, done_paths, X, y_labels, errors)
 
     if errors:
-        console.print(f"[yellow]{len(errors)} faixas com erro foram ignoradas.[/yellow]")
+        console.print(f"[yellow]{errors} faixas com erro foram ignoradas.[/yellow]")
 
-    X = np.array(X)
-    y = np.array(y_labels)
+    X_arr = np.array(X)
+    y_arr = np.array(y_labels)
 
     scaler = StandardScaler()
-    X_scaled = scaler.fit_transform(X)
+    X_scaled = scaler.fit_transform(X_arr)
 
     model = RandomForestClassifier(n_estimators=n_estimators, random_state=42, n_jobs=-1)
 
     console.print("[cyan]Validação cruzada (5-fold)...[/cyan]")
-    scores = cross_val_score(model, X_scaled, y, cv=5)
+    cv = min(5, len(set(y_labels)))
+    scores = cross_val_score(model, X_scaled, y_arr, cv=cv)
     console.print(f"[green]Acurácia média: {scores.mean():.2%} ± {scores.std():.2%}[/green]")
 
-    model.fit(X_scaled, y)
+    model.fit(X_scaled, y_arr)
 
     bundle = {
         'model': model,
@@ -102,6 +175,8 @@ def train(dataset_dir: str, output_path: str = 'model.pkl', n_estimators: int = 
     }
     with open(output_path, 'wb') as f:
         pickle.dump(bundle, f)
+
+    clear_checkpoint()
 
     console.print(f"[green]Modelo salvo em {output_path}[/green]")
     console.print(f"[dim]Gêneros treinados: {len(set(y_labels))}[/dim]")
