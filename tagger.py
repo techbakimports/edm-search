@@ -9,7 +9,9 @@ Exemplos:
 import base64
 import json
 import os
+import random
 import re
+import time
 import urllib.request
 import urllib.parse
 from pathlib import Path
@@ -42,6 +44,31 @@ _VERSION_RE = re.compile(
 
 def _clean_title(title: str) -> str:
     return _VERSION_RE.sub('', title).strip()
+
+
+# Ruído típico de sites de download/blog nos nomes de arquivo:
+#   "[www.electrobuzz.net]", "(Free Download)", "[320kbps]", "http://site.com"
+_TITLE_JUNK_RE = re.compile(
+    r'\s*[\[\(](?:'
+    r'https?://[^\]\)\s]*|'                                                                          # http(s):// URL
+    r'ftp://[^\]\)\s]*|'                                                                             # ftp:// URL
+    r'www\.[a-zA-Z0-9][a-zA-Z0-9\-]*(?:\.[a-zA-Z0-9\-]+)*\.[a-zA-Z]{2,}[^\]\)]*|'                 # www.site.com
+    r'[a-zA-Z0-9][a-zA-Z0-9\-]*(?:\.[a-zA-Z0-9\-]+)*\.(?:com|net|org|io|fm|me|co|club|info|'      # site.com/net/...
+    r'de|uk|fr|pl|ru|nl|br|pt|es|it|se|no|dk|fi|at|be|ch)[^\]\)]*|'
+    r'(?:free\s*)?downloads?|'                                                                       # (Free Download)
+    r'\d{2,3}\s*kbps|'                                                                              # (320kbps)
+    r'@[a-zA-Z0-9_]+|'                                                                              # @username
+    r'(?:hq|hd)\b'                                                                                  # (HQ), (HD)
+    r')[\]\)]'
+    r'|\s+(?:https?://|www\.)\S+$',                                                                 # URL solta no fim
+    re.IGNORECASE,
+)
+
+
+def _clean_filename_title(title: str) -> str:
+    """Remove ruído de sites de download/blog do título parseado do arquivo."""
+    cleaned = _TITLE_JUNK_RE.sub('', title).strip().strip('-_ ').strip()
+    return cleaned or title
 
 
 _MIN_SCORE = 80  # confiança mínima do MusicBrainz para aceitar o match
@@ -485,6 +512,76 @@ def _scrape_ddg_image(artist: str, title: str) -> str | None:
     return results[0].get('image') if results else None
 
 
+def _scrape_google_year(artist: str, title: str) -> str | None:
+    """
+    Extrai ano de lançamento via Google Search.
+    Procura no knowledge panel ("Released: YYYY") e nos snippets de resultado.
+    """
+    search_title = _clean_title(title)
+    q = urllib.parse.quote_plus(f'"{artist}" "{search_title}" release year')
+    try:
+        html = _http_get(f'https://www.google.com/search?q={q}&hl=en&gl=us')
+        # Knowledge panel: "Released: 2019" ou "Release date: ..."
+        m = re.search(
+            r'(?:released?|release\s*date)[^<\d]{0,40}(\b(?:19[89]\d|20[0-3]\d)\b)',
+            html, re.IGNORECASE,
+        )
+        if m:
+            return m.group(1)
+        # Fallback: primeiro ano em divs de snippet do Google
+        for snippet in re.findall(r'<div[^>]*>([^<]{10,300})</div>', html):
+            yr = _YEAR_RE.search(snippet)
+            if yr:
+                candidate = int(yr.group())
+                if 1980 <= candidate <= 2030:
+                    return yr.group()
+    except Exception:
+        pass
+    return None
+
+
+# CDNs de plataformas de música confiáveis — única origem aceita para capas do Google Images.
+# Impede que imagens não relacionadas (de outros sites) sejam gravadas no arquivo.
+_TRUSTED_COVER_DOMAINS = re.compile(
+    r'(?:'
+    r'beatport\.com|'
+    r'amazon\.com|amazon\.[a-z]{2,3}|'         # loja Amazon (qualquer país)
+    r'i\.scdn\.co|'                              # CDN do Spotify
+    r'soundcloud\.com|'
+    r'cdns-images\.dzcdn\.net|'                  # CDN do Deezer
+    r'is\d+\.mzstatic\.com|a\d+\.mzstatic\.com|'  # CDN da Apple/iTunes
+    r'img\.discogs\.com|discogs\.com'
+    r')',
+    re.IGNORECASE,
+)
+
+
+def _scrape_google_cover(artist: str, title: str) -> str | None:
+    """
+    Busca URL de capa via Google Images.
+    Só retorna URLs de CDNs de plataformas musicais confiáveis (_TRUSTED_COVER_DOMAINS).
+    Se o Google não retornar nenhuma imagem de fonte confiável, retorna None.
+    """
+    search_title = _clean_title(title)
+    queries = [
+        (f'{artist} {search_title} cover '
+         'site:beatport.com OR site:amazon.com OR site:open.spotify.com OR site:soundcloud.com'),
+        f'{artist} {search_title} album cover art',
+    ]
+    for q_str in queries:
+        q = urllib.parse.quote_plus(q_str)
+        try:
+            html = _http_get(f'https://www.google.com/search?q={q}&tbm=isch&hl=en&gl=us')
+            urls = re.findall(r'"ou"\s*:\s*"(https?://[^"]+)"', html)
+            for url in urls:
+                if (re.search(r'\.(jpg|jpeg|png|webp)', url, re.IGNORECASE)
+                        and _TRUSTED_COVER_DOMAINS.search(url)):
+                    return url
+        except Exception:
+            pass
+    return None
+
+
 def _scrape_web(artist: str, title: str) -> dict:
     """
     Scraper sem chave de API: Beatport (ano + capa) → DuckDuckGo texto (só ano).
@@ -511,8 +608,8 @@ def _scrape_web(artist: str, title: str) -> dict:
 
 # ── Orquestrador ──────────────────────────────────────────────────────────────
 #
-#  ANO:    Beatport → MusicBrainz → Deezer → iTunes → DDG texto → Discogs
-#  CAPA:   Deezer  → iTunes → MusicBrainz → Beatport → Discogs
+#  ANO:    Google → Beatport → MusicBrainz → Deezer → iTunes → DDG texto → Discogs
+#  CAPA:   Google Images → Beatport → Deezer → iTunes → MusicBrainz → Discogs
 #  GÊNERO: Beatport → Deezer → iTunes → Last.fm → Discogs
 #
 def _fetch_all_metadata(artist: str, title: str) -> dict:
@@ -521,18 +618,33 @@ def _fetch_all_metadata(artist: str, title: str) -> dict:
     cover_bytes: bytes | None = None
     genre:       str   | None = None
 
-    # 1. Beatport — melhor para EDM (ano + gênero precisos + capa)
+    # 1. Google — knowledge panel (ano) + Images com filtro Beatport/Amazon/Spotify/SoundCloud (capa)
     try:
-        bp    = _scrape_beatport(artist, title)
-        year  = bp.get('year')
-        genre = bp.get('genre')
-        if bp.get('cover_url'):
-            cover_bytes = _try_cover(bp['cover_url'])
+        year = _scrape_google_year(artist, title)
+    except Exception:
+        pass
+    try:
+        goog_url = _scrape_google_cover(artist, title)
+        if goog_url:
+            cover_bytes = _try_cover(goog_url)
     except Exception:
         pass
 
-    # 2. Deezer — capa confiável + ano + gênero
-    if not cover_bytes or not genre:
+    # 2. Beatport — melhor para EDM (ano + gênero precisos + capa)
+    if not year or not cover_bytes or not genre:
+        try:
+            bp = _scrape_beatport(artist, title)
+            if not year:
+                year = bp.get('year')
+            if not genre:
+                genre = bp.get('genre')
+            if not cover_bytes and bp.get('cover_url'):
+                cover_bytes = _try_cover(bp['cover_url'])
+        except Exception:
+            pass
+
+    # 3. Deezer — capa confiável + ano + gênero
+    if not cover_bytes or not genre or not year:
         try:
             dz = _fetch_deezer_data(artist, title)
             if not year:
@@ -544,7 +656,7 @@ def _fetch_all_metadata(artist: str, title: str) -> dict:
         except Exception:
             pass
 
-    # 3. iTunes — capa + ano + gênero como fallback
+    # 4. iTunes — capa + ano + gênero como fallback
     if not year or not cover_bytes or not genre:
         try:
             it = _fetch_itunes_data(artist, title)
@@ -557,7 +669,7 @@ def _fetch_all_metadata(artist: str, title: str) -> dict:
         except Exception:
             pass
 
-    # 4. MusicBrainz — Cover Art Archive + ano
+    # 5. MusicBrainz — Cover Art Archive + ano
     if not year or not cover_bytes:
         try:
             mb = _fetch_musicbrainz_data(artist, title)
@@ -571,21 +683,21 @@ def _fetch_all_metadata(artist: str, title: str) -> dict:
         except Exception:
             pass
 
-    # 5. Last.fm — gênero via tags crowdsourced (requer LASTFM_API_KEY)
+    # 6. Last.fm — gênero via tags crowdsourced (requer LASTFM_API_KEY)
     if not genre:
         try:
             genre = _fetch_lastfm_genre(artist, title)
         except Exception:
             pass
 
-    # 6. DuckDuckGo texto — só para ano
+    # 7. DuckDuckGo texto — só para ano
     if not year:
         try:
             year = _scrape_ddg_year(artist, title)
         except Exception:
             pass
 
-    # 7. Discogs — último recurso
+    # 8. Discogs — último recurso
     if not year or not cover_bytes or not genre:
         try:
             dc = _fetch_discogs_data(artist, title)
@@ -788,6 +900,8 @@ def tag_file(
             'error':         'nome não segue o padrão "Artista - Título.ext"',
         }
 
+    title = _clean_filename_title(title)
+
     year:        str   | None = None
     cover_bytes: bytes | None = None
     genre:       str   | None = None
@@ -824,8 +938,16 @@ def tag_folder(
         for f in sorted(os.listdir(folder))
         if Path(f).suffix.lower() in exts
     ]
-    return [
-        tag_file(p, dry_run=dry_run, fetch_year_online=fetch_year_online,
-                 fetch_cover=fetch_cover, fetch_genre=fetch_genre)
-        for p in paths
-    ]
+    results = []
+    for i, p in enumerate(paths):
+        results.append(tag_file(
+            p, dry_run=dry_run,
+            fetch_year_online=fetch_year_online,
+            fetch_cover=fetch_cover,
+            fetch_genre=fetch_genre,
+        ))
+        # Pausa entre arquivos para não acionar rate limit do Google.
+        # Jitter aleatório (2–4 s) torna o padrão menos detectável como bot.
+        if i < len(paths) - 1:
+            time.sleep(2 + random.uniform(0, 2))
+    return results
