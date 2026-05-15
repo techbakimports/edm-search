@@ -385,17 +385,38 @@ _SCRAPE_HEADERS = {
     'User-Agent': (
         'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
         'AppleWebKit/537.36 (KHTML, like Gecko) '
-        'Chrome/124.0.0.0 Safari/537.36'
+        'Chrome/125.0.0.0 Safari/537.36'
     ),
     'Accept-Language': 'en-US,en;q=0.9',
 }
 
+# Padrões que indicam que o Google está bloqueando a requisição
+_GOOGLE_BLOCK_RE = re.compile(
+    r'(?:unusual traffic|captcha|/sorry/|recaptcha|detected automated)',
+    re.IGNORECASE,
+)
+
+_HTTP_RETRY_ATTEMPTS = 3
+_HTTP_RETRY_BASE_DELAY = 2.0  # segundos; dobra a cada tentativa (backoff exponencial)
+
 
 def _http_get(url: str, extra_headers: dict | None = None) -> str:
     headers = {**_SCRAPE_HEADERS, **(extra_headers or {})}
-    req = urllib.request.Request(url, headers=headers)
-    with urllib.request.urlopen(req, timeout=12) as resp:
-        return resp.read().decode('utf-8', errors='replace')
+    last_exc: Exception | None = None
+    for attempt in range(_HTTP_RETRY_ATTEMPTS):
+        try:
+            req = urllib.request.Request(url, headers=headers)
+            with urllib.request.urlopen(req, timeout=12) as resp:
+                html = resp.read().decode('utf-8', errors='replace')
+            if _GOOGLE_BLOCK_RE.search(html):
+                raise RuntimeError('Google bloqueou a requisição (CAPTCHA/rate-limit)')
+            return html
+        except Exception as exc:
+            last_exc = exc
+            if attempt < _HTTP_RETRY_ATTEMPTS - 1:
+                wait = _HTTP_RETRY_BASE_DELAY * (2 ** attempt) + random.uniform(0, 1)
+                time.sleep(wait)
+    raise last_exc  # type: ignore[misc]
 
 
 def _find_in_json(obj, *, depth: int = 0) -> list:
@@ -545,12 +566,16 @@ def _scrape_google_year(artist: str, title: str) -> str | None:
 _TRUSTED_COVER_DOMAINS = re.compile(
     r'(?:'
     r'beatport\.com|'
-    r'amazon\.com|amazon\.[a-z]{2,3}|'         # loja Amazon (qualquer país)
-    r'i\.scdn\.co|'                              # CDN do Spotify
+    r'amazon\.com|amazon\.[a-z]{2,3}|'           # loja Amazon (qualquer país)
+    r'i\.scdn\.co|'                                # CDN do Spotify
     r'soundcloud\.com|'
-    r'cdns-images\.dzcdn\.net|'                  # CDN do Deezer
+    r'cdns-images\.dzcdn\.net|'                    # CDN do Deezer
     r'is\d+\.mzstatic\.com|a\d+\.mzstatic\.com|'  # CDN da Apple/iTunes
-    r'img\.discogs\.com|discogs\.com'
+    r'img\.discogs\.com|discogs\.com|'
+    r'junodownload\.com|juno\.co\.uk|'             # Juno Download
+    r'traxsource\.com|'                            # Traxsource
+    r'f4\.bcbits\.com|bandcamp\.com|'              # Bandcamp
+    r'boomkat\.com'                                # Boomkat
     r')',
     re.IGNORECASE,
 )
