@@ -207,7 +207,7 @@ def classify_ml(features: dict, model_path: str = 'model.pkl') -> list[dict]:
 def classify(features: dict, use_ml: bool = True) -> dict:
     """
     Ponto de entrada principal.
-    Prioridade: Last.fm (metadados) > ML > rule-based.
+    Prioridade: ML > Last.fm > rule-based.
     """
     rule_results = classify_rule_based(features)
     ml_results = []
@@ -228,7 +228,7 @@ def classify(features: dict, use_ml: bool = True) -> dict:
         'lastfm':              None,
     }
 
-    # Tenta enriquecimento via Last.fm se o arquivo tiver metadados
+    # Last.fm enriquece os metadados mas só sobrescreve o gênero se o modelo ML não estiver ativo
     path = features.get('file_path')
     if path:
         try:
@@ -236,8 +236,7 @@ def classify(features: dict, use_ml: bool = True) -> dict:
             ext = enrich(path)
             if ext:
                 result['lastfm'] = ext
-                # Last.fm com confiança razoável vira resultado primário
-                if ext['confidence'] >= 0.15:
+                if not ml_results and ext['confidence'] >= 0.15:
                     result['genre']      = ext['genre']
                     result['subgenre']   = ext['subgenre']
                     result['confidence'] = ext['confidence']
