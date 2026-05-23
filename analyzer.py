@@ -166,6 +166,21 @@ def extract_features(y, sr) -> dict:
     features['onset_strength_mean'] = float(np.mean(onset_env))
     features['onset_strength_std'] = float(np.std(onset_env))
 
+    # --- Tempogram (padrões rítmicos periódicos) ---
+    # Fourier tempogram: captura frequências de pulso no domínio espectral
+    # Útil para distinguir subgêneros com BPM similar (ex: Techno vs. Trance)
+    fourier_tg = np.abs(librosa.feature.fourier_tempogram(onset_envelope=onset_env, sr=sr))
+    features['fourier_tempogram_mean'] = float(np.mean(fourier_tg))
+    features['fourier_tempogram_std'] = float(np.std(fourier_tg))
+    features['fourier_tempogram_max'] = float(np.max(fourier_tg))
+
+    # Autocorrelation tempogram: captura periodicidade do groove
+    # Útil para distinguir grooves com subdivisões diferentes (ex: House vs. Techno)
+    ac_tg = librosa.feature.tempogram(onset_envelope=onset_env, sr=sr)
+    features['ac_tempogram_mean'] = float(np.mean(ac_tg))
+    features['ac_tempogram_std'] = float(np.std(ac_tg))
+    features['ac_tempogram_max'] = float(np.max(ac_tg))
+
     return features
 
 

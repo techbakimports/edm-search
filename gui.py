@@ -20,7 +20,8 @@ import dearpygui.dearpygui as dpg
 
 from analyzer import analyze_file
 from classifier import classify
-from config import SUPPORTED_FORMATS
+from config import (SUPPORTED_FORMATS, APP_NAME, APP_VERSION,
+                    COMPANY_NAME, APP_DESCRIPTION, APP_COPYRIGHT)
 from tagger import tag_file, tag_folder
 
 # ── Fila thread-safe ──────────────────────────────────────────────────
@@ -1828,6 +1829,85 @@ def _build_batch_tab():
     W["batch_table_container"] = dpg.add_group()
 
 
+# ── Splash ────────────────────────────────────────────────────────────
+def _build_splash():
+    sw, sh = 500, 290
+    vw, vh = 1280, 800
+    px, py  = (vw - sw) // 2, (vh - sh) // 2
+
+    with dpg.window(tag="splash_window", no_title_bar=True, no_move=True,
+                    no_resize=True, no_scrollbar=True, no_collapse=True,
+                    width=sw, height=sh, pos=[px, py]):
+        with dpg.theme() as _t:
+            with dpg.theme_component(dpg.mvAll):
+                dpg.add_theme_color(dpg.mvThemeCol_WindowBg, (14, 10, 24, 252))
+                dpg.add_theme_color(dpg.mvThemeCol_Border,   (170, 40, 255, 200))
+                dpg.add_theme_style(dpg.mvStyleVar_WindowBorderSize, 2)
+                dpg.add_theme_style(dpg.mvStyleVar_WindowRounding, 10)
+        dpg.bind_item_theme("splash_window", _t)
+
+        dpg.add_spacer(height=28)
+        dpg.add_text(APP_NAME,        color=list(ACCENT),  indent=20)
+        dpg.add_text(APP_DESCRIPTION, color=list(DIM),     indent=20)
+        dpg.add_spacer(height=6)
+        dpg.add_separator()
+        dpg.add_spacer(height=10)
+        dpg.add_text(COMPANY_NAME,    color=list(PURPLE),  indent=20)
+        dpg.add_text(f"Versão {APP_VERSION}", color=list(DIM), indent=20)
+        dpg.add_spacer(height=28)
+        dpg.add_separator()
+        dpg.add_spacer(height=8)
+        dpg.add_text(APP_COPYRIGHT,   color=list(DIM),     indent=20)
+        dpg.add_spacer(height=12)
+        with dpg.group(horizontal=True):
+            dpg.add_spacer(width=sw - 160)
+            dpg.add_button(
+                label="  Continuar  ",
+                callback=lambda: dpg.delete_item("splash_window"),
+            )
+
+
+# ── Sobre ─────────────────────────────────────────────────────────────
+def _build_about_tab():
+    dpg.add_spacer(height=20)
+    dpg.add_text(APP_NAME,        color=list(ACCENT))
+    dpg.add_text(APP_DESCRIPTION, color=list(DIM))
+    dpg.add_spacer(height=4)
+    dpg.add_separator()
+    dpg.add_spacer(height=10)
+
+    with dpg.table(header_row=False, borders_innerV=False):
+        dpg.add_table_column(width_fixed=True, init_width_or_weight=130)
+        dpg.add_table_column()
+
+        with dpg.table_row():
+            dpg.add_text("Versão",   color=list(DIM))
+            dpg.add_text(APP_VERSION, color=list(WHITE))
+        with dpg.table_row():
+            dpg.add_text("Empresa",  color=list(DIM))
+            dpg.add_text(COMPANY_NAME, color=list(PURPLE))
+        with dpg.table_row():
+            dpg.add_text("Plataforma", color=list(DIM))
+            dpg.add_text("Windows  /  Python 3.13  /  DearPyGui 2.x", color=list(WHITE))
+        with dpg.table_row():
+            dpg.add_text("Análise",  color=list(DIM))
+            dpg.add_text("librosa  /  scikit-learn (Random Forest)", color=list(WHITE))
+        with dpg.table_row():
+            dpg.add_text("APIs",     color=list(DIM))
+            dpg.add_text("Last.fm  /  Spotify  /  Discogs", color=list(WHITE))
+
+    dpg.add_spacer(height=16)
+    dpg.add_separator()
+    dpg.add_spacer(height=10)
+    dpg.add_text(APP_COPYRIGHT, color=list(DIM))
+    dpg.add_spacer(height=6)
+    dpg.add_text(
+        "Este software é propriedade exclusiva da Techbak Solutions.\n"
+        "Uso não autorizado é proibido.",
+        color=list(DIM),
+    )
+
+
 # ── Launch ────────────────────────────────────────────────────────────
 def launch():
     dpg.create_context()
@@ -1942,17 +2022,29 @@ def launch():
                 with dpg.child_window(border=False):
                     _build_train_tab()
 
-    dpg.create_viewport(title="Music Analyzer", width=1280, height=800,
+            # ── Sobre ────────────────────────────────────────────────
+            with dpg.tab(label="  Sobre  "):
+                with dpg.child_window(border=False):
+                    _build_about_tab()
+
+    _build_splash()
+
+    dpg.create_viewport(title=f"{APP_NAME}  |  {COMPANY_NAME}", width=1280, height=800,
                         min_width=960, min_height=620)
     dpg.setup_dearpygui()
     dpg.set_primary_window("main_window", True)
     dpg.show_viewport()
 
+    _splash_frames = [0]
     while dpg.is_dearpygui_running():
         try:
             _process_ui_queue()
         except Exception:
             import traceback; traceback.print_exc()
+        if dpg.does_item_exist("splash_window"):
+            _splash_frames[0] += 1
+            if _splash_frames[0] >= 240:  # ~4 segundos a 60fps
+                dpg.delete_item("splash_window")
         dpg.render_dearpygui_frame()
 
     dpg.destroy_context()

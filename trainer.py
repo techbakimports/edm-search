@@ -32,6 +32,8 @@ NUMERIC_FEATURES = [
     'spectral_contrast_mean', 'zcr_mean',
     'percussive_ratio', 'onset_strength_mean', 'onset_strength_std',
     'chroma_mean', 'chroma_std',
+    'fourier_tempogram_mean', 'fourier_tempogram_std', 'fourier_tempogram_max',
+    'ac_tempogram_mean', 'ac_tempogram_std', 'ac_tempogram_max',
 ] + [f'mfcc_{i}_mean' for i in range(1, 14)] + [f'mfcc_{i}_std' for i in range(1, 14)]
 
 

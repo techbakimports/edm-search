@@ -1,6 +1,12 @@
 # Taxonomia de gêneros e subgêneros da música eletrônica
 # (genre, subgenre, bpm_min, bpm_max, tags espectrais)
 
+APP_NAME        = "EDM Analyzer"
+APP_VERSION     = "1.0.0"
+COMPANY_NAME    = "Techbak Solutions"
+APP_DESCRIPTION = "Análise profissional de música eletrônica"
+APP_COPYRIGHT   = "© 2026 Techbak Solutions. Todos os direitos reservados."
+
 GENRE_TAXONOMY = [
 
     # ── AMBIENT / DOWNTEMPO ──────────────────────────────────────────
