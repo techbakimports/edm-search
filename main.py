@@ -12,6 +12,9 @@ Uso:
     python main.py --tag <arquivo|pasta> --dry-run    # Pré-visualiza sem gravar
     python main.py --tag <arquivo|pasta> --no-year    # Não busca ano na internet
     python main.py --tag <arquivo|pasta> --no-cover   # Não baixa capa automática
+    python main.py --rename <arquivo|pasta>               # Renomeia arquivos (limpa lixo do nome)
+    python main.py --rename <arquivo|pasta> --dry-run     # Pré-visualiza sem renomear
+    python main.py --rename <arquivo|pasta> --no-titlecase # Sem Title Case
 """
 import argparse
 import os
@@ -479,6 +482,64 @@ def tag_command(target: str, dry_run: bool, no_year: bool, no_cover: bool, no_ge
         console.print("[dim]  Dica: use --no-year para pular a busca online se estiver offline.[/dim]")
 
 
+def rename_command(target: str, dry_run: bool, title_case: bool):
+    """Renomeia arquivos de áudio limpando lixo do nome."""
+    from tagger import rename_file, rename_folder
+
+    if os.path.isfile(target):
+        results = [rename_file(target, dry_run=dry_run, title_case=title_case)]
+    elif os.path.isdir(target):
+        console.print(f"[cyan]Buscando arquivos de áudio em: {target}[/cyan]\n")
+        results = rename_folder(target, dry_run=dry_run, title_case=title_case)
+    else:
+        console.print(f"[red]Caminho não encontrado: {target}[/red]")
+        sys.exit(1)
+
+    if not results:
+        console.print("[yellow]Nenhum arquivo de áudio encontrado.[/yellow]")
+        return
+
+    mode_label = "[yellow](dry-run — nenhum arquivo foi renomeado)[/yellow]" if dry_run else ""
+
+    table = Table(
+        title=f"Rename {mode_label}",
+        box=box.ROUNDED,
+        border_style="cyan",
+    )
+    table.add_column("Antes",  style="white",   max_width=50)
+    table.add_column("Depois", style="cyan",    max_width=50)
+    table.add_column("Status", justify="center", width=10)
+
+    renamed = unchanged = errors = 0
+    for r in results:
+        old = r.get('file', '')
+        new = r.get('new_name') or '—'
+
+        if r.get('error') and not r.get('renamed'):
+            status = f"[red]✗ {r['error'][:30]}[/red]"
+            errors += 1
+        elif r.get('renamed'):
+            status = "[green]✓[/green]" if not dry_run else "[yellow]preview[/yellow]"
+            renamed += 1
+        else:
+            status = "[dim]inalterado[/dim]"
+            unchanged += 1
+            new = "[dim]= igual[/dim]"
+
+        # Destaca as diferenças entre antes e depois
+        if r.get('renamed') and old != new:
+            table.add_row(f"[dim]{old}[/dim]", f"[bold]{new}[/bold]", status)
+        else:
+            table.add_row(old, new, status)
+
+    console.print(table)
+    console.print(
+        f"\n  [green]{renamed} renomeado(s)[/green]"
+        + (f"  [dim]{unchanged} inalterado(s)[/dim]" if unchanged else "")
+        + (f"  [red]{errors} erro(s)[/red]" if errors else "")
+    )
+
+
 def audit_command(dataset_dir: str, threshold: float = 0.8, export_fmt: str = None):
     """Percorre o dataset, classifica com ML e reporta discordâncias de alta confiança."""
     if not os.path.exists('model.pkl'):
@@ -588,6 +649,8 @@ def main():
     parser.add_argument('--no-year',    action='store_true', help="Com --tag: não busca ano na internet")
     parser.add_argument('--no-cover',   action='store_true', help="Com --tag: não baixa capa automática")
     parser.add_argument('--no-genre',   action='store_true', help="Com --tag: não busca gênero automaticamente")
+    parser.add_argument('--rename',     metavar='CAMINHO', help="Renomeia arquivos limpando lixo do nome")
+    parser.add_argument('--no-titlecase', action='store_true', help="Com --rename: não aplica Title Case")
     parser.add_argument('--train',      metavar='DATASET', help="Treina o modelo ML com o dataset (genre/subgenre/arquivo)")
     parser.add_argument('--audit',      metavar='DATASET', help="Audita dataset: detecta faixas possivelmente mal rotuladas")
     parser.add_argument('--threshold',  type=float, default=0.8, help="Com --audit: confiança mínima (padrão: 0.8)")
@@ -606,6 +669,11 @@ def main():
 
     if args.audit:
         audit_command(args.audit, threshold=args.threshold, export_fmt=args.export)
+        return
+
+    if args.rename:
+        rename_command(args.rename, dry_run=args.dry_run,
+                       title_case=not args.no_titlecase)
         return
 
     if args.tag:

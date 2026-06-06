@@ -1128,13 +1128,18 @@ def _build_download_tab():
 
 
 # ── Auto-tagging ──────────────────────────────────────────────────────
+def _enable_tag_buttons():
+    _ui(dpg.configure_item, W["tag_run_btn"],    enabled=True)
+    _ui(dpg.configure_item, W["tag_rename_btn"], enabled=True)
+
+
 def _open_tag_target():
     def _pick():
         try:
             path = _win_open_file("Selecionar arquivo para tagar")
             if path:
                 _ui(dpg.set_value, W["tag_target_text"], path)
-                _ui(dpg.configure_item, W["tag_run_btn"], enabled=True)
+                _enable_tag_buttons()
         except Exception as e:
             _ui(dpg.set_value, W["tag_status"], f"Erro: {e}")
     threading.Thread(target=_pick, daemon=True).start()
@@ -1146,18 +1151,19 @@ def _open_tag_folder():
             folder = _win_open_folder("Selecionar pasta para tagar")
             if folder:
                 _ui(dpg.set_value, W["tag_target_text"], folder)
-                _ui(dpg.configure_item, W["tag_run_btn"], enabled=True)
+                _enable_tag_buttons()
         except Exception as e:
             _ui(dpg.set_value, W["tag_status"], f"Erro: {e}")
     threading.Thread(target=_pick, daemon=True).start()
 
 
 def _run_tag():
-    target    = dpg.get_value(W["tag_target_text"])
+    target      = dpg.get_value(W["tag_target_text"])
     dry_run     = dpg.get_value(W["tag_dry_run"])
     apply_year  = dpg.get_value(W["tag_apply_year"])
     apply_cover = dpg.get_value(W["tag_apply_cover"])
-    no_genre    = dpg.get_value(W["tag_no_genre"])
+    apply_genre = dpg.get_value(W["tag_apply_genre"])
+    do_rename   = dpg.get_value(W["tag_rename"])
 
     if not target:
         return
@@ -1168,9 +1174,10 @@ def _run_tag():
 
     def _do():
         try:
+            from tagger import rename_file
             fetch_year  = apply_year
             fetch_cover = apply_cover
-            fetch_genre = not no_genre
+            fetch_genre = apply_genre
             if os.path.isfile(target):
                 files = [target]
             else:
@@ -1187,11 +1194,26 @@ def _run_tag():
                     f"{i+1}/{total} — {os.path.basename(fpath)[:50]}")
                 _ui(dpg.set_value, W["tag_progress"],
                     (i + 1) / total if total else 1.0)
-                results.append(tag_file(
+                result = tag_file(
                     fpath, dry_run=dry_run,
                     fetch_year_online=fetch_year, fetch_cover=fetch_cover,
                     fetch_genre=fetch_genre,
-                ))
+                )
+                # Rename: renomeia o arquivo após tagar com sucesso
+                if do_rename and result.get('written') and not dry_run:
+                    actual_path = result.get('path', fpath)
+                    rr = rename_file(actual_path, dry_run=False, title_case=True)
+                    result['rename_from'] = rr.get('file')
+                    result['rename_to']   = rr.get('new_name')
+                    result['renamed']     = rr.get('renamed', False)
+                    if rr.get('renamed') and rr.get('path'):
+                        result['path'] = rr['path']
+                elif do_rename and dry_run:
+                    rr = rename_file(fpath, dry_run=True, title_case=True)
+                    result['rename_from'] = rr.get('file')
+                    result['rename_to']   = rr.get('new_name')
+                    result['renamed']     = rr.get('renamed', False)
+                results.append(result)
 
             _ui(_apply_tag_table, results, dry_run)
         except Exception as e:
@@ -1199,6 +1221,36 @@ def _run_tag():
             _ui(dpg.set_value, W["tag_status"], f"Erro: {e}")
         finally:
             _ui(dpg.configure_item, W["tag_run_btn"], enabled=True)
+
+    threading.Thread(target=_do, daemon=True).start()
+
+
+def _run_rename_only():
+    """Rename standalone — sem tagging, só limpa nomes."""
+    target    = dpg.get_value(W["tag_target_text"])
+    dry_run   = dpg.get_value(W["tag_dry_run"])
+
+    if not target:
+        return
+
+    _ui(dpg.set_value,      W["tag_status"],   "Renomeando...")
+    _ui(dpg.set_value,      W["tag_progress"], 0.0)
+    _ui(dpg.configure_item, W["tag_rename_btn"], enabled=False)
+
+    def _do():
+        try:
+            from tagger import rename_file, rename_folder
+            if os.path.isfile(target):
+                results = [rename_file(target, dry_run=dry_run, title_case=True)]
+            else:
+                results = rename_folder(target, dry_run=dry_run, title_case=True)
+
+            _ui(_apply_rename_table, results, dry_run)
+        except Exception as e:
+            import traceback; traceback.print_exc()
+            _ui(dpg.set_value, W["tag_status"], f"Erro: {e}")
+        finally:
+            _ui(dpg.configure_item, W["tag_rename_btn"], enabled=True)
 
     threading.Thread(target=_do, daemon=True).start()
 
@@ -1211,13 +1263,19 @@ def _apply_tag_table(results: list[dict], dry_run: bool):
         except Exception:
             pass
 
-    ok  = sum(1 for r in results if r.get("written"))
-    err = sum(1 for r in results if r.get("error") and not r.get("written"))
+    ok       = sum(1 for r in results if r.get("written"))
+    err      = sum(1 for r in results if r.get("error") and not r.get("written"))
+    renamed  = sum(1 for r in results if r.get("renamed"))
     mode = " (dry-run)" if dry_run else ""
+    status_parts = [f"{ok} tagado(s)", f"{err} erro(s)"]
+    if renamed:
+        status_parts.append(f"{renamed} renomeado(s)")
     dpg.set_value(W["tag_status"],
-                  f"Concluído{mode} — {ok} tagado(s)  {err} erro(s)")
+                  f"Concluído{mode} — {'  '.join(status_parts)}")
 
     container = W["tag_table_container"]
+    has_rename = any(r.get("rename_to") for r in results)
+
     tbl = dpg.add_table(
         parent=container,
         header_row=True,
@@ -1228,7 +1286,10 @@ def _apply_tag_table(results: list[dict], dry_run: bool):
     )
     W["tag_table"] = tbl
 
-    for col in ["Arquivo", "Artista", "Título", "Gênero", "Ano", "Capa", "Status"]:
+    cols = ["Arquivo", "Artista", "Título", "Gênero", "Ano", "Capa", "Status"]
+    if has_rename:
+        cols.append("Novo nome")
+    for col in cols:
         dpg.add_table_column(parent=tbl, label=col)
 
     for r in results:
@@ -1258,6 +1319,64 @@ def _apply_tag_table(results: list[dict], dry_run: bool):
             dpg.add_text(label, parent=row, color=list(YELLOW if dry_run else GREEN))
         else:
             dpg.add_text("—", parent=row, color=list(DIM))
+
+        if has_rename:
+            rto = r.get("rename_to") or ""
+            if r.get("renamed") and rto and rto != r.get("file"):
+                dpg.add_text(rto[:38], parent=row, color=list(ACCENT))
+            else:
+                dpg.add_text("—", parent=row, color=list(DIM))
+
+
+def _apply_rename_table(results: list[dict], dry_run: bool):
+    prev = W.get("tag_table")
+    if prev:
+        try:
+            dpg.delete_item(prev)
+        except Exception:
+            pass
+
+    renamed   = sum(1 for r in results if r.get("renamed"))
+    unchanged = sum(1 for r in results if not r.get("renamed") and not r.get("error"))
+    errors    = sum(1 for r in results if r.get("error"))
+    mode = " (dry-run)" if dry_run else ""
+    dpg.set_value(W["tag_status"],
+                  f"Rename{mode} — {renamed} renomeado(s)  "
+                  f"{unchanged} inalterado(s)  {errors} erro(s)")
+    dpg.set_value(W["tag_progress"], 1.0)
+
+    container = W["tag_table_container"]
+    tbl = dpg.add_table(
+        parent=container,
+        header_row=True,
+        borders_innerH=True,
+        borders_outerH=True,
+        borders_outerV=True,
+        row_background=True,
+    )
+    W["tag_table"] = tbl
+
+    for col in ["Antes", "Depois", "Status"]:
+        dpg.add_table_column(parent=tbl, label=col)
+
+    for r in results:
+        row = dpg.add_table_row(parent=tbl)
+        old_name = r.get("file", "")
+        new_name = r.get("new_name") or "—"
+
+        if r.get("error"):
+            dpg.add_text(old_name[:45], parent=row, color=list(RED))
+            dpg.add_text("—",          parent=row, color=list(DIM))
+            dpg.add_text(r["error"][:30], parent=row, color=list(RED))
+        elif r.get("renamed") and new_name != old_name:
+            dpg.add_text(old_name[:45], parent=row, color=list(DIM))
+            dpg.add_text(new_name[:45], parent=row, color=list(ACCENT))
+            label = "preview" if dry_run else "OK"
+            dpg.add_text(label, parent=row, color=list(YELLOW if dry_run else GREEN))
+        else:
+            dpg.add_text(old_name[:45], parent=row, color=list(DIM))
+            dpg.add_text("= igual",    parent=row, color=list(DIM))
+            dpg.add_text("—",          parent=row, color=list(DIM))
 
 
 # ── Construtores UI ───────────────────────────────────────────────────
@@ -1759,11 +1878,12 @@ def _build_compare_table():
 
 
 def _build_tag_tab():
-    dpg.add_text("Auto-tagging", color=list(ACCENT))
+    dpg.add_text("Auto-tagging & Rename", color=list(ACCENT))
     dpg.add_separator()
     dpg.add_spacer(height=6)
     dpg.add_text(
-        "Lê o nome do arquivo (\"Artista - Título.ext\") e grava as tags ID3/Vorbis.",
+        "Lê o nome do arquivo (\"Artista - Título.ext\"), grava tags ID3/Vorbis "
+        "e pode renomear o arquivo limpando lixo do nome.",
         color=list(DIM), wrap=700,
     )
     dpg.add_spacer(height=8)
@@ -1781,14 +1901,26 @@ def _build_tag_tab():
         dpg.add_spacer(width=16)
         W["tag_apply_cover"] = dpg.add_checkbox(label="Aplicar capa", default_value=True)
         dpg.add_spacer(width=16)
-        W["tag_no_genre"]   = dpg.add_checkbox(label="Não buscar gênero")
+        W["tag_apply_genre"] = dpg.add_checkbox(label="Buscar gênero")
+        dpg.add_spacer(width=16)
+        W["tag_rename"]     = dpg.add_checkbox(label="Renomear arquivo")
 
     dpg.add_spacer(height=6)
-    W["tag_run_btn"] = dpg.add_button(
-        label="  Tagar  ",
-        callback=lambda *_: _run_tag(),
-        enabled=False,
-    )
+    with dpg.group(horizontal=True):
+        W["tag_run_btn"] = dpg.add_button(
+            label="  Tagar  ",
+            callback=lambda *_: _run_tag(),
+            enabled=False,
+        )
+        dpg.add_spacer(width=12)
+        W["tag_rename_btn"] = dpg.add_button(
+            label="  Só Renomear  ",
+            callback=lambda *_: _run_rename_only(),
+            enabled=False,
+        )
+        dpg.add_spacer(width=16)
+        dpg.add_text("Só renomear: limpa lixo do nome sem buscar tags online",
+                     color=list(DIM))
 
     dpg.add_spacer(height=8)
     W["tag_status"]   = dpg.add_text("", color=list(DIM))
@@ -1831,7 +1963,7 @@ def _build_batch_tab():
 
 # ── Splash ────────────────────────────────────────────────────────────
 def _build_splash():
-    sw, sh = 500, 290
+    sw, sh = 500, 340
     vw, vh = 1280, 800
     px, py  = (vw - sw) // 2, (vh - sh) // 2
 
@@ -1858,7 +1990,7 @@ def _build_splash():
         dpg.add_separator()
         dpg.add_spacer(height=8)
         dpg.add_text(APP_COPYRIGHT,   color=list(DIM),     indent=20)
-        dpg.add_spacer(height=12)
+        dpg.add_spacer(height=20)
         with dpg.group(horizontal=True):
             dpg.add_spacer(width=sw - 160)
             dpg.add_button(

@@ -36,6 +36,8 @@ python main.py --compare <arq1> <arq2>          # Compara duas faixas
 python main.py --gui                            # Interface gráfica
 python main.py --tag <arquivo|pasta>            # Auto-tagging
 python main.py --tag <arquivo|pasta> --dry-run  # Preview sem gravar
+python main.py --rename <arquivo|pasta>         # Renomeia limpando lixo do nome
+python main.py --rename <arquivo|pasta> --dry-run  # Preview sem renomear
 python trainer.py --dataset ./dataset --output model.pkl  # Treina novo modelo
 ```
 

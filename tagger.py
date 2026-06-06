@@ -48,6 +48,7 @@ def _clean_title(title: str) -> str:
 
 # Ruído típico de sites de download/blog nos nomes de arquivo:
 #   "[www.electrobuzz.net]", "(Free Download)", "[320kbps]", "http://site.com"
+#   "synapsemusic.cc" (colado no final, sem colchetes)
 _TITLE_JUNK_RE = re.compile(
     r'\s*[\[\(](?:'
     r'https?://[^\]\)\s]*|'                                                                          # http(s):// URL
@@ -64,10 +65,27 @@ _TITLE_JUNK_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Domínios/URLs soltos no final do nome SEM colchetes/parênteses:
+#   "Title synapsemusic.cc"  →  "Title"
+#   "Title edmwaves.org"     →  "Title"
+_BARE_DOMAIN_RE = re.compile(
+    r'\s+'
+    r'(?:https?://)?'
+    r'(?:www\.)?'
+    r'[a-zA-Z0-9][a-zA-Z0-9\-]*'
+    r'(?:\.[a-zA-Z0-9\-]+)*'
+    r'\.(?:com|net|org|io|fm|me|co|club|info|cc|ru|pl|nl|br|pt|es|it|se|uk|fr|de|no|dk|fi|at|be|ch)'
+    r'(?:/\S*)?'                                                                                     # path opcional
+    r'\s*$',
+    re.IGNORECASE,
+)
+
 
 def _clean_filename_title(title: str) -> str:
     """Remove ruído de sites de download/blog do título parseado do arquivo."""
-    cleaned = _TITLE_JUNK_RE.sub('', title).strip().strip('-_ ').strip()
+    cleaned = _TITLE_JUNK_RE.sub('', title)
+    cleaned = _BARE_DOMAIN_RE.sub('', cleaned)
+    cleaned = cleaned.strip().strip('-_ ').strip()
     return cleaned or title
 
 
@@ -976,3 +994,181 @@ def tag_folder(
         if i < len(paths) - 1:
             time.sleep(2 + random.uniform(0, 2))
     return results
+
+
+# ── Rename ─────────────────────────────────────────────────────────────────────
+
+# Palavras que devem permanecer minúsculas em Title Case (exceto no início)
+_TITLE_CASE_LOWER = {'a', 'an', 'and', 'as', 'at', 'but', 'by', 'for', 'from',
+                     'in', 'into', 'nor', 'of', 'on', 'or', 'so', 'the', 'to',
+                     'vs', 'vs.', 'with'}
+
+# Palavras/siglas que devem permanecer em UPPER CASE
+_TITLE_CASE_UPPER = {'dj', 'vip', 'uk', 'edm', 'id', 'ep', 'lp', 'ii', 'iii',
+                     'iv', 'bpm', 'hd', 'hq', 'ft', 'mv'}
+
+
+def _smart_title_case(text: str) -> str:
+    """
+    Title Case inteligente para nomes de música:
+      - Primeira palavra sempre capitalizada
+      - Preposições/artigos em minúscula (exceto primeira)
+      - Siglas conhecidas em UPPER (DJ, VIP, UK, etc.)
+      - Preserva conteúdo entre parênteses/colchetes (aplica mesma lógica)
+    """
+    def _capitalize_word(word: str, is_first: bool) -> str:
+        lower = word.lower()
+        if lower in _TITLE_CASE_UPPER:
+            return word.upper()
+        if not is_first and lower in _TITLE_CASE_LOWER:
+            return lower
+        # Preserva ALL CAPS intencional: nomes artísticos (TELYKAST, PNAU, OMAIR)
+        # e acrônimos com pontos (A.M.C). Exige 2+ letras para não afetar "A", "I".
+        if len(word) >= 2 and word == word.upper() and word.isalpha():
+            return word
+        if len(word) >= 2 and word == word.upper() and '.' in word:
+            return word
+        # Palavras com hífen: capitaliza cada parte (Re-Twin, Hi-Tech)
+        if '-' in word:
+            return '-'.join(_capitalize_word(part, True) for part in word.split('-'))
+        return word.capitalize()
+
+    def _process_segment(segment: str) -> str:
+        words = segment.split()
+        return ' '.join(_capitalize_word(w, i == 0) for i, w in enumerate(words))
+
+    # Separa partes entre parênteses/colchetes para processar individualmente
+    parts = re.split(r'(\([^)]*\)|\[[^\]]*\])', text)
+    result = []
+    for part in parts:
+        if part.startswith('(') and part.endswith(')'):
+            inner = _process_segment(part[1:-1])
+            result.append(f'({inner})')
+        elif part.startswith('[') and part.endswith(']'):
+            inner = _process_segment(part[1:-1])
+            result.append(f'[{inner}]')
+        else:
+            result.append(_process_segment(part))
+    out = ''.join(result)
+    # Garante espaço antes de ( e [ que ficaram colados
+    out = re.sub(r'(?<=\S)\(', ' (', out)
+    out = re.sub(r'(?<=\S)\[', ' [', out)
+    return out
+
+
+def _sanitize_filename(name: str) -> str:
+    """Remove caracteres proibidos em nomes de arquivo (Windows + Linux)."""
+    # Substitui caracteres proibidos por equivalentes seguros
+    replacements = {
+        '<': '‹', '>': '›', ':': '꞉', '"': "'", '/': '-',
+        '\\': '-', '|': '¦', '?': '', '*': '✱',
+    }
+    for char, repl in replacements.items():
+        name = name.replace(char, repl)
+    # Remove espaços múltiplos e trailing dots/spaces (Windows não permite)
+    name = re.sub(r'\s{2,}', ' ', name).strip().rstrip('. ')
+    return name
+
+
+def build_clean_name(artist: str, title: str, ext: str,
+                     title_case: bool = True) -> str:
+    """
+    Constrói o nome limpo do arquivo:
+      1. Limpa lixo do título (domínios, URLs, tags de download)
+      2. Garante espaço antes de parênteses/colchetes
+      3. Aplica Title Case (opcional)
+      4. Sanitiza caracteres proibidos
+      5. Formato: "Artista - Título.ext"
+    """
+    clean_title = _clean_filename_title(title)
+    # Garante espaço antes de ( e [ que não têm espaço antes
+    clean_title = re.sub(r'(?<=[^\s([\-])(\()', r' \1', clean_title)
+    clean_title = re.sub(r'(?<=[^\s([\-])(\[)', r' \1', clean_title)
+    # Remove espaços duplicados
+    clean_title = re.sub(r'\s{2,}', ' ', clean_title).strip()
+    if title_case:
+        artist = _smart_title_case(artist)
+        clean_title = _smart_title_case(clean_title)
+    name = f"{artist} - {clean_title}{ext}"
+    return _sanitize_filename(name)
+
+
+def rename_file(path: str, dry_run: bool = False,
+                title_case: bool = True) -> dict:
+    """
+    Renomeia um arquivo de áudio para o padrão limpo "Artista - Título.ext".
+
+    Retorna dict com:
+      - file: nome original
+      - new_name: nome novo (ou None se sem mudança)
+      - new_path: caminho completo novo
+      - renamed: bool
+      - error: str ou None
+    """
+    original_name = Path(path).name
+    ext = Path(path).suffix
+
+    artist, title = parse_filename(path)
+
+    result = {
+        'path':     path,
+        'file':     original_name,
+        'artist':   artist,
+        'title':    title,
+        'new_name': None,
+        'new_path': None,
+        'renamed':  False,
+        'error':    None,
+    }
+
+    if not artist or not title:
+        result['error'] = 'nome não segue o padrão "Artista - Título.ext"'
+        return result
+
+    new_name = build_clean_name(artist, title, ext, title_case=title_case)
+
+    if new_name == original_name:
+        result['new_name'] = new_name
+        return result  # já está limpo, sem mudança
+
+    result['new_name'] = new_name
+    new_path = os.path.join(os.path.dirname(path), new_name)
+    result['new_path'] = new_path
+
+    if dry_run:
+        result['renamed'] = True  # sinaliza que SERIA renomeado
+        return result
+
+    # Evita sobrescrever arquivo existente com nome diferente
+    if os.path.exists(new_path) and os.path.normcase(new_path) != os.path.normcase(path):
+        result['error'] = f'arquivo já existe: {new_name}'
+        return result
+
+    try:
+        # Windows: case-insensitive, precisa de rename em 2 passos se só mudar case
+        if os.path.normcase(new_path) == os.path.normcase(path) and new_name != original_name:
+            tmp = path + '.tmp_rename'
+            os.rename(path, tmp)
+            os.rename(tmp, new_path)
+        else:
+            os.rename(path, new_path)
+        result['renamed'] = True
+        result['path'] = new_path
+    except OSError as e:
+        result['error'] = str(e)
+
+    return result
+
+
+def rename_folder(folder: str, dry_run: bool = False,
+                  title_case: bool = True,
+                  extensions: list[str] | None = None) -> list[dict]:
+    """Renomeia todos os arquivos de áudio de uma pasta."""
+    from config import SUPPORTED_FORMATS
+    exts = set(extensions or SUPPORTED_FORMATS)
+    paths = [
+        os.path.join(folder, f)
+        for f in sorted(os.listdir(folder))
+        if Path(f).suffix.lower() in exts
+    ]
+    return [rename_file(p, dry_run=dry_run, title_case=title_case) for p in paths]
