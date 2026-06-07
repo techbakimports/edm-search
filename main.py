@@ -33,7 +33,7 @@ from rich.columns import Columns
 from rich.text import Text
 from rich import box
 
-from analyzer import analyze_file
+from analyzer import analyze_file, dj_compatibility
 from classifier import classify
 from config import SUPPORTED_FORMATS
 
@@ -153,6 +153,40 @@ def compare_tracks(path1: str, path2: str):
     table.add_row("Percussão",  f"{f1['percussive_ratio']:.2f}", f"{f2['percussive_ratio']:.2f}", diff(f1['percussive_ratio'], f2['percussive_ratio'], ".2f"))
 
     console.print(table)
+
+    # ── Compatibilidade DJ ────────────────────────────────────────
+    compat = dj_compatibility(f1, f2, c1, c2)
+    score  = compat['score']
+    rating = compat['rating']
+
+    if score >= 85:
+        color = "green"
+    elif score >= 70:
+        color = "cyan"
+    elif score >= 50:
+        color = "yellow"
+    elif score >= 30:
+        color = "red"
+    else:
+        color = "red"
+
+    bar_width = 30
+    filled = round(score / 100 * bar_width)
+    bar = f"[{color}]{'█' * filled}[/{color}][dim]{'░' * (bar_width - filled)}[/dim]"
+
+    console.print(Panel(
+        f"  {bar}  [{color} bold]{score}%[/{color} bold]  —  "
+        f"[{color} bold]{rating}[/{color} bold]\n\n"
+        f"  [dim]BPM {compat['bpm']['score']}%  ·  "
+        f"Tom {compat['key']['score']}%  ·  "
+        f"Energia {compat['energy']['score']}%  ·  "
+        f"Gênero {compat['genre']['score']}%[/dim]\n\n"
+        + "\n".join(f"  [dim]•[/dim] {tip}" for tip in compat['tips']),
+        title="[bold]Compatibilidade para Mixagem[/bold]",
+        border_style=color,
+        expand=False,
+        padding=(1, 2),
+    ))
 
     console.print("\n[bold white]  Espectro — Faixa 1[/bold white]")
     print_spectrum_bars(f1)

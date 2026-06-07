@@ -18,7 +18,7 @@ from datetime import datetime
 import numpy as np
 import dearpygui.dearpygui as dpg
 
-from analyzer import analyze_file
+from analyzer import analyze_file, dj_compatibility
 from classifier import classify
 from config import (SUPPORTED_FORMATS, APP_NAME, APP_VERSION,
                     COMPANY_NAME, APP_DESCRIPTION, APP_COPYRIGHT)
@@ -419,6 +419,16 @@ def _open_vis_from_batch(track: dict):
 
 
 # ── Comparar ──────────────────────────────────────────────────────────
+
+_COMPAT_COLORS = {
+    'Perfeita':      (50,  255,  80, 255),   # verde neon
+    'Boa':           (100, 255, 145, 255),   # verde suave
+    'Possível':      (255, 200,  50, 255),   # amarelo
+    'Difícil':       (255, 130,  50, 255),   # laranja
+    'Incompatível':  (255,  70,  80, 255),   # vermelho
+}
+
+
 def _run_compare():
     a = _tracks.get("A")
     b = _tracks.get("B")
@@ -460,6 +470,28 @@ def _run_compare():
 
     dpg.set_value(W["compare_titles"],
                   f"{fa['file_name'][:28]}  vs  {fb['file_name'][:28]}")
+
+    # ── Compatibilidade DJ ─────────────────────────────────────────
+    compat = dj_compatibility(fa, fb, ca, cb)
+    score  = compat['score']
+    rating = compat['rating']
+    color  = _COMPAT_COLORS.get(rating, list(WHITE))
+
+    dpg.set_value(W["compat_score"], f"{score}%")
+    dpg.configure_item(W["compat_score"], color=list(color))
+    dpg.set_value(W["compat_rating"], rating)
+    dpg.configure_item(W["compat_rating"], color=list(color))
+    dpg.set_value(W["compat_bar"], score / 100)
+
+    # Sub-scores
+    dpg.set_value(W["compat_bpm"],    f"{compat['bpm']['score']}%")
+    dpg.set_value(W["compat_key"],    f"{compat['key']['score']}%")
+    dpg.set_value(W["compat_energy"], f"{compat['energy']['score']}%")
+    dpg.set_value(W["compat_genre"],  f"{compat['genre']['score']}%")
+
+    # Dicas
+    tips_text = "\n".join(f"• {t}" for t in compat['tips'])
+    dpg.set_value(W["compat_tips"], tips_text)
 
 
 # ── Análise em lote ───────────────────────────────────────────────────
@@ -1875,6 +1907,37 @@ def _build_compare_table():
                 W[f"cmp_a_{i}"]   = dpg.add_text("", color=list(ACCENT))
                 W[f"cmp_b_{i}"]   = dpg.add_text("", color=list(ACCENT2))
                 W[f"cmp_d_{i}"]   = dpg.add_text("", color=list(WHITE))
+
+    # ── Painel de Compatibilidade DJ ──────────────────────────────
+    dpg.add_spacer(height=10)
+    dpg.add_separator()
+    dpg.add_spacer(height=6)
+    dpg.add_text("Compatibilidade para Mixagem", color=list(ACCENT))
+    dpg.add_spacer(height=6)
+
+    with dpg.group(horizontal=True):
+        W["compat_score"]  = dpg.add_text("—", color=list(DIM))
+        dpg.add_spacer(width=8)
+        W["compat_rating"] = dpg.add_text("", color=list(DIM))
+
+    W["compat_bar"] = dpg.add_progress_bar(default_value=0.0, width=-1)
+    dpg.add_spacer(height=8)
+
+    with dpg.table(header_row=True, borders_innerH=True,
+                   borders_outerV=True, row_background=True, width=-1):
+        dpg.add_table_column(label="Critério")
+        dpg.add_table_column(label="Score")
+        for label, wkey in [("BPM (35%)", "compat_bpm"),
+                            ("Tom (30%)", "compat_key"),
+                            ("Energia (20%)", "compat_energy"),
+                            ("Gênero (15%)", "compat_genre")]:
+            with dpg.table_row():
+                dpg.add_text(label, color=list(DIM))
+                W[wkey] = dpg.add_text("—", color=list(WHITE))
+
+    dpg.add_spacer(height=8)
+    dpg.add_text("Dicas", color=list(ACCENT))
+    W["compat_tips"] = dpg.add_text("", color=list(DIM), wrap=500)
 
 
 def _build_tag_tab():
