@@ -16,6 +16,8 @@ import urllib.request
 import urllib.parse
 from pathlib import Path
 
+_USER_AGENT = 'EDMAnalyzer/1.0 (edm-search)'
+
 
 # ── Parsing ───────────────────────────────────────────────────────────────────
 
@@ -96,7 +98,7 @@ def _query_musicbrainz(query: str) -> list[dict]:
     params = urllib.parse.urlencode({'query': query, 'fmt': 'json', 'limit': 10})
     req = urllib.request.Request(
         f'https://musicbrainz.org/ws/2/recording/?{params}',
-        headers={'User-Agent': 'EDMAnalyzer/1.0 (edm-search)'},
+        headers={'User-Agent': _USER_AGENT},
     )
     with urllib.request.urlopen(req, timeout=10) as resp:
         data = json.loads(resp.read().decode())
@@ -189,10 +191,6 @@ def fetch_year_musicbrainz(artist: str, title: str) -> str | None:
         return None
 
 
-def fetch_year(artist: str, title: str) -> str | None:
-    return fetch_year_musicbrainz(artist, title)
-
-
 # ── iTunes Search API ─────────────────────────────────────────────────────────
 
 def _fetch_itunes_data(artist: str, title: str) -> dict:
@@ -209,7 +207,7 @@ def _fetch_itunes_data(artist: str, title: str) -> dict:
     })
     req = urllib.request.Request(
         f'https://itunes.apple.com/search?{params}',
-        headers={'User-Agent': 'EDMAnalyzer/1.0 (edm-search)'},
+        headers={'User-Agent': _USER_AGENT},
     )
     try:
         with urllib.request.urlopen(req, timeout=10) as resp:
@@ -262,7 +260,7 @@ def _fetch_discogs_data(artist: str, title: str) -> dict:
     req = urllib.request.Request(
         f'https://api.discogs.com/database/search?{params}',
         headers={
-            'User-Agent':    'EDMAnalyzer/1.0 (edm-search)',
+            'User-Agent':    _USER_AGENT,
             'Authorization': f'Discogs key={DISCOGS_KEY}, secret={DISCOGS_SECRET}',
         },
     )
@@ -306,7 +304,7 @@ def _fetch_deezer_data(artist: str, title: str) -> dict:
     })
     req = urllib.request.Request(
         f'https://api.deezer.com/search?{params}',
-        headers={'User-Agent': 'EDMAnalyzer/1.0 (edm-search)'},
+        headers={'User-Agent': _USER_AGENT},
     )
     try:
         with urllib.request.urlopen(req, timeout=10) as resp:
@@ -330,7 +328,7 @@ def _fetch_deezer_data(artist: str, title: str) -> dict:
         try:
             req2 = urllib.request.Request(
                 f'https://api.deezer.com/album/{album_id}',
-                headers={'User-Agent': 'EDMAnalyzer/1.0 (edm-search)'},
+                headers={'User-Agent': _USER_AGENT},
             )
             with urllib.request.urlopen(req2, timeout=10) as resp2:
                 alb = json.loads(resp2.read().decode())
@@ -377,7 +375,7 @@ def _fetch_lastfm_genre(artist: str, title: str) -> str | None:
     })
     req = urllib.request.Request(
         f'https://ws.audioscrobbler.com/2.0/?{params}',
-        headers={'User-Agent': 'EDMAnalyzer/1.0 (edm-search)'},
+        headers={'User-Agent': _USER_AGENT},
     )
     try:
         with urllib.request.urlopen(req, timeout=10) as resp:
@@ -528,28 +526,6 @@ def _scrape_ddg_year(artist: str, title: str) -> str | None:
     return None
 
 
-def _scrape_ddg_image(artist: str, title: str) -> str | None:
-    """Extrai URL de capa do DuckDuckGo Images via token vqd."""
-    search_title = _clean_title(title)
-    q_str = f'{artist} {search_title} cover art'
-    q = urllib.parse.quote_plus(q_str)
-
-    # Passo 1: obtém token vqd da página de busca
-    html = _http_get(f'https://duckduckgo.com/?q={q}&iax=images&ia=images')
-    m = re.search(r'vqd=["\']{0,1}([\d\-a-zA-Z%_]+)["\']{0,1}', html)
-    if not m:
-        return None
-    vqd = m.group(1)
-
-    # Passo 2: busca imagens com o token
-    params = urllib.parse.urlencode({
-        'q': q_str, 'vqd': vqd, 'o': 'json',
-        'p': '1', 's': '0', 'u': 'bing', 'f': ',,,,', 'l': 'us-en',
-    })
-    data = json.loads(_http_get(f'https://duckduckgo.com/i.js?{params}'))
-    results = data.get('results', [])
-    return results[0].get('image') if results else None
-
 
 def _scrape_google_year(artist: str, title: str) -> str | None:
     """
@@ -623,30 +599,6 @@ def _scrape_google_cover(artist: str, title: str) -> str | None:
         except Exception:
             pass
     return None
-
-
-def _scrape_web(artist: str, title: str) -> dict:
-    """
-    Scraper sem chave de API: Beatport (ano + capa) → DuckDuckGo texto (só ano).
-    DDG Images removido — retornava capas sem relação com a faixa.
-    Retorna {'year': str, 'cover_url': str} — campos ausentes se não encontrado.
-    """
-    result: dict = {}
-
-    try:
-        result.update(_scrape_beatport(artist, title))
-    except Exception:
-        pass
-
-    if 'year' not in result:
-        try:
-            year = _scrape_ddg_year(artist, title)
-            if year:
-                result['year'] = year
-        except Exception:
-            pass
-
-    return result
 
 
 # ── Orquestrador ──────────────────────────────────────────────────────────────
@@ -760,7 +712,7 @@ def _fetch_all_metadata(artist: str, title: str) -> dict:
 
 def _try_cover(url: str) -> bytes | None:
     req = urllib.request.Request(
-        url, headers={'User-Agent': 'EDMAnalyzer/1.0 (edm-search)'},
+        url, headers={'User-Agent': _USER_AGENT},
     )
     try:
         with urllib.request.urlopen(req, timeout=15) as resp:
@@ -795,6 +747,10 @@ def fetch_cover_art(
 def _image_mime(data: bytes) -> str:
     if data[:4] == b'\x89PNG':
         return 'image/png'
+    if len(data) >= 12 and data[:4] == b'RIFF' and data[8:12] == b'WEBP':
+        return 'image/webp'
+    if data[:4] == b'GIF8':
+        return 'image/gif'
     return 'image/jpeg'
 
 
@@ -803,7 +759,7 @@ def write_cover(path: str, image_bytes: bytes) -> bool:
     ext  = Path(path).suffix.lower()
     mime = _image_mime(image_bytes)
     try:
-        if ext in ('.mp3', '.wav'):
+        if ext == '.mp3':
             from mutagen.id3 import ID3, APIC
             from mutagen.id3 import error as ID3Error
             try:

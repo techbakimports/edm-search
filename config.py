@@ -1,3 +1,6 @@
+import os
+from dotenv import load_dotenv
+
 # Taxonomia de gêneros e subgêneros da música eletrônica
 # (genre, subgenre, bpm_min, bpm_max, tags espectrais)
 
@@ -136,10 +139,7 @@ SPECTRAL_THRESHOLDS = {
     "acid_min_bass_ratio":     0.35,
 }
 
-SUPPORTED_FORMATS = [".mp3", ".wav", ".flac", ".ogg", ".m4a", ".aiff"]
-
-import os
-from dotenv import load_dotenv
+SUPPORTED_FORMATS = (".mp3", ".wav", ".flac", ".ogg", ".m4a", ".aiff")
 
 load_dotenv()
 

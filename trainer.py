@@ -68,7 +68,8 @@ def load_checkpoint(dataset_dir: str) -> dict | None:
         if os.path.normpath(data.get('dataset_dir', '')) != os.path.normpath(dataset_dir):
             return None
         return data
-    except Exception:
+    except Exception as e:
+        console.print(f"[yellow]Checkpoint corrompido, recomeçando: {e}[/yellow]")
         return None
 
 
@@ -85,7 +86,8 @@ def scan_dataset(dataset_dir: str) -> list[tuple[str, str, str]]:
       2 níveis: dataset_dir/subgenre/arquivo.mp3  (genre = nome da pasta selecionada)
     """
     items = []
-    supported = {'.mp3', '.wav', '.flac', '.ogg', '.m4a', '.aiff'}
+    from config import SUPPORTED_FORMATS
+    supported = set(SUPPORTED_FORMATS)
     root_name = os.path.basename(os.path.normpath(dataset_dir))
 
     for entry in os.listdir(dataset_dir):
@@ -154,6 +156,10 @@ def train(dataset_dir: str, output_path: str = 'model.pkl', n_estimators: int = 
     if errors:
         console.print(f"[yellow]{errors} faixas com erro foram ignoradas.[/yellow]")
 
+    if not X:
+        console.print("[red]Nenhuma feature extraída com sucesso. Abortando.[/red]")
+        return
+
     X_arr = np.array(X)
     y_arr = np.array(y_labels)
 
@@ -162,10 +168,13 @@ def train(dataset_dir: str, output_path: str = 'model.pkl', n_estimators: int = 
 
     model = RandomForestClassifier(n_estimators=n_estimators, random_state=42, n_jobs=-1)
 
-    console.print("[cyan]Validação cruzada (5-fold)...[/cyan]")
     cv = min(5, len(set(y_labels)))
-    scores = cross_val_score(model, X_scaled, y_arr, cv=cv)
-    console.print(f"[green]Acurácia média: {scores.mean():.2%} ± {scores.std():.2%}[/green]")
+    if cv < 2:
+        console.print("[yellow]Poucas classes para validação cruzada, pulando...[/yellow]")
+    else:
+        console.print(f"[cyan]Validação cruzada ({cv}-fold)...[/cyan]")
+        scores = cross_val_score(model, X_scaled, y_arr, cv=cv)
+        console.print(f"[green]Acurácia média: {scores.mean():.2%} ± {scores.std():.2%}[/green]")
 
     model.fit(X_scaled, y_arr)
 

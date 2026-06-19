@@ -9,11 +9,12 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 import threading
 import queue
 import ctypes
 from ctypes import wintypes
-from datetime import datetime
+import traceback
 
 import numpy as np
 import dearpygui.dearpygui as dpg
@@ -22,7 +23,7 @@ from analyzer import analyze_file, dj_compatibility
 from classifier import classify
 from config import (SUPPORTED_FORMATS, APP_NAME, APP_VERSION,
                     COMPANY_NAME, APP_DESCRIPTION, APP_COPYRIGHT)
-from tagger import tag_file, tag_folder
+from tagger import tag_file
 
 # ── Fila thread-safe ──────────────────────────────────────────────────
 _ui_queue: queue.Queue = queue.Queue()
@@ -39,7 +40,7 @@ def _process_ui_queue():
         try:
             fn(*args, **kwargs)
         except Exception:
-            import traceback; traceback.print_exc()
+            traceback.print_exc()
 
 # ── Estado global ─────────────────────────────────────────────────────
 W: dict = {}
@@ -49,7 +50,9 @@ _batch_folder:  str | None = None
 _dl_process:      "subprocess.Popen | None" = None
 _dl_dest_folder:  str                       = os.path.expanduser("~/Downloads")
 _dl_log_lines:    list                      = []
+_dl_log_lock:     threading.Lock            = threading.Lock()
 _train_log_lines: list[str]                 = []
+_train_log_lock:  threading.Lock            = threading.Lock()
 _train_stop_flag: threading.Event          = threading.Event()
 _audit_results:   list[dict]                = []
 _dl_search_results: list                    = []
@@ -84,33 +87,35 @@ def _fmt_dur(s: float) -> str:
 
 
 # ── Diálogos Windows nativos ──────────────────────────────────────────
+class OPENFILENAME(ctypes.Structure):
+    _fields_ = [
+        ("lStructSize",       wintypes.DWORD),
+        ("hwndOwner",         wintypes.HWND),
+        ("hInstance",         wintypes.HINSTANCE),
+        ("lpstrFilter",       wintypes.LPCWSTR),
+        ("lpstrCustomFilter", wintypes.LPWSTR),
+        ("nMaxCustFilter",    wintypes.DWORD),
+        ("nFilterIndex",      wintypes.DWORD),
+        ("lpstrFile",         wintypes.LPWSTR),
+        ("nMaxFile",          wintypes.DWORD),
+        ("lpstrFileTitle",    wintypes.LPWSTR),
+        ("nMaxFileTitle",     wintypes.DWORD),
+        ("lpstrInitialDir",   wintypes.LPCWSTR),
+        ("lpstrTitle",        wintypes.LPCWSTR),
+        ("Flags",             wintypes.DWORD),
+        ("nFileOffset",       wintypes.WORD),
+        ("nFileExtension",    wintypes.WORD),
+        ("lpstrDefExt",       wintypes.LPCWSTR),
+        ("lCustData",         ctypes.c_ssize_t),
+        ("lpfnHook",          ctypes.c_void_p),
+        ("lpTemplateName",    wintypes.LPCWSTR),
+        ("pvReserved",        ctypes.c_void_p),
+        ("dwReserved",        wintypes.DWORD),
+        ("FlagsEx",           wintypes.DWORD),
+    ]
+
+
 def _win_open_file(title="Selecionar arquivo") -> str | None:
-    class OPENFILENAME(ctypes.Structure):
-        _fields_ = [
-            ("lStructSize",       wintypes.DWORD),
-            ("hwndOwner",         wintypes.HWND),
-            ("hInstance",         wintypes.HINSTANCE),
-            ("lpstrFilter",       wintypes.LPCWSTR),
-            ("lpstrCustomFilter", wintypes.LPWSTR),
-            ("nMaxCustFilter",    wintypes.DWORD),
-            ("nFilterIndex",      wintypes.DWORD),
-            ("lpstrFile",         wintypes.LPWSTR),
-            ("nMaxFile",          wintypes.DWORD),
-            ("lpstrFileTitle",    wintypes.LPWSTR),
-            ("nMaxFileTitle",     wintypes.DWORD),
-            ("lpstrInitialDir",   wintypes.LPCWSTR),
-            ("lpstrTitle",        wintypes.LPCWSTR),
-            ("Flags",             wintypes.DWORD),
-            ("nFileOffset",       wintypes.WORD),
-            ("nFileExtension",    wintypes.WORD),
-            ("lpstrDefExt",       wintypes.LPCWSTR),
-            ("lCustData",         ctypes.c_ssize_t),
-            ("lpfnHook",          ctypes.c_void_p),
-            ("lpTemplateName",    wintypes.LPCWSTR),
-            ("pvReserved",        ctypes.c_void_p),
-            ("dwReserved",        wintypes.DWORD),
-            ("FlagsEx",           wintypes.DWORD),
-        ]
     buf = ctypes.create_unicode_buffer(32768)
     ofn = OPENFILENAME()
     ofn.lStructSize = ctypes.sizeof(OPENFILENAME)
@@ -162,32 +167,6 @@ def _win_open_folder(title="Selecionar pasta") -> str | None:
 
 
 def _win_save_file(title="Salvar", filter_str="CSV\0*.csv\0", default_ext="csv") -> str | None:
-    class OPENFILENAME(ctypes.Structure):
-        _fields_ = [
-            ("lStructSize",       wintypes.DWORD),
-            ("hwndOwner",         wintypes.HWND),
-            ("hInstance",         wintypes.HINSTANCE),
-            ("lpstrFilter",       wintypes.LPCWSTR),
-            ("lpstrCustomFilter", wintypes.LPWSTR),
-            ("nMaxCustFilter",    wintypes.DWORD),
-            ("nFilterIndex",      wintypes.DWORD),
-            ("lpstrFile",         wintypes.LPWSTR),
-            ("nMaxFile",          wintypes.DWORD),
-            ("lpstrFileTitle",    wintypes.LPWSTR),
-            ("nMaxFileTitle",     wintypes.DWORD),
-            ("lpstrInitialDir",   wintypes.LPCWSTR),
-            ("lpstrTitle",        wintypes.LPCWSTR),
-            ("Flags",             wintypes.DWORD),
-            ("nFileOffset",       wintypes.WORD),
-            ("nFileExtension",    wintypes.WORD),
-            ("lpstrDefExt",       wintypes.LPCWSTR),
-            ("lCustData",         ctypes.c_ssize_t),
-            ("lpfnHook",          ctypes.c_void_p),
-            ("lpTemplateName",    wintypes.LPCWSTR),
-            ("pvReserved",        ctypes.c_void_p),
-            ("dwReserved",        wintypes.DWORD),
-            ("FlagsEx",           wintypes.DWORD),
-        ]
     buf = ctypes.create_unicode_buffer(32768)
     ofn = OPENFILENAME()
     ofn.lStructSize = ctypes.sizeof(OPENFILENAME)
@@ -200,6 +179,28 @@ def _win_save_file(title="Salvar", filter_str="CSV\0*.csv\0", default_ext="csv")
     if ctypes.windll.comdlg32.GetSaveFileNameW(ctypes.byref(ofn)):
         return buf.value
     return None
+
+
+# ── Helper de exportação ──────────────────────────────────────────────
+def _build_export_row(r: dict) -> dict:
+    f    = r["features"]
+    c    = r["classification"]
+    rule = (c.get("rule_based_candidates") or c.get("candidates") or [{}])[0]
+    ext  = c.get("lastfm") or {}
+    return {
+        "file":              f.get("file_name"),
+        "bpm":               round(f.get("bpm", 0), 1),
+        "key":               f.get("dominant_key"),
+        "duration":          round(f.get("duration_seconds", 0), 1),
+        "genre_local":       rule.get("genre"),
+        "subgenre_local":    rule.get("subgenre"),
+        "confidence_local":  round(rule.get("score", 0), 3),
+        "genre_external":    ext.get("genre"),
+        "subgenre_external": ext.get("subgenre"),
+        "source_external":   ext.get("method"),
+        "bass_ratio":        round(f.get("bass_ratio", 0), 3),
+        "rms_mean":          round(f.get("rms_mean", 0), 4),
+    }
 
 
 # ── Análise única ─────────────────────────────────────────────────────
@@ -215,7 +216,7 @@ def _open_file(slot: str):
                 _ui(dpg.configure_item, W[f"btn_exp_json_{slot}"], enabled=False)
                 threading.Thread(target=_analyze, args=(slot, path), daemon=True).start()
         except Exception as e:
-            import traceback; traceback.print_exc()
+            traceback.print_exc()
             _ui(dpg.set_value, W[f"status_{slot}"], f"Erro: {e}")
     threading.Thread(target=_pick, daemon=True).start()
 
@@ -233,7 +234,6 @@ def _analyze(slot: str, path: str):
         _ui(dpg.configure_item, W[f"btn_exp_csv_{slot}"], enabled=True)
         _ui(dpg.configure_item, W[f"btn_exp_json_{slot}"], enabled=True)
     except Exception as e:
-        import traceback
         print(traceback.format_exc())
         _ui(dpg.set_value, W[f"status_{slot}"], f"Erro: {str(e)[:120]}")
 
@@ -330,7 +330,7 @@ def _compute_waveform(slot: str, path: str):
         x = list(range(_WAVE_N))
         _ui(_update_waveform, slot, x, pos, neg)
     except Exception:
-        import traceback; traceback.print_exc()
+        traceback.print_exc()
 
 
 def _update_waveform(slot: str, x: list, pos: list, neg: list):
@@ -351,9 +351,6 @@ def _export_single(slot: str, fmt: str):
         track = _tracks.get(slot)
         if not track:
             return
-        f, c = track["features"], track["classification"]
-        rule = (c.get("rule_based_candidates") or c.get("candidates") or [{}])[0]
-        ext  = c.get("lastfm") or {}
 
         path = _win_save_file(
             title=f"Exportar como {fmt.upper()}",
@@ -363,20 +360,7 @@ def _export_single(slot: str, fmt: str):
         if not path:
             return
 
-        row = {
-            "file":              f.get("file_name"),
-            "bpm":               round(f.get("bpm", 0), 1),
-            "key":               f.get("dominant_key"),
-            "duration":          round(f.get("duration_seconds", 0), 1),
-            "genre_local":       rule.get("genre"),
-            "subgenre_local":    rule.get("subgenre"),
-            "confidence_local":  round(rule.get("score", 0), 3),
-            "genre_external":    ext.get("genre"),
-            "subgenre_external": ext.get("subgenre"),
-            "source_external":   ext.get("method"),
-            "bass_ratio":        round(f.get("bass_ratio", 0), 3),
-            "rms_mean":          round(f.get("rms_mean", 0), 4),
-        }
+        row = _build_export_row(track)
         try:
             if fmt == "json":
                 with open(path, "w", encoding="utf-8") as fp:
@@ -403,7 +387,7 @@ def _open_visualizer(slot: str):
             from visualizer import plot_analysis
             plot_analysis(track["path"], track["features"], track["classification"])
         except Exception as e:
-            import traceback; traceback.print_exc()
+            traceback.print_exc()
             _ui(dpg.set_value, W[f"status_{slot}"], f"Visualizador: {e}")
     threading.Thread(target=_show, daemon=True).start()
 
@@ -414,7 +398,7 @@ def _open_vis_from_batch(track: dict):
             from visualizer import plot_analysis
             plot_analysis(track["path"], track["features"], track["classification"])
         except Exception as e:
-            import traceback; traceback.print_exc()
+            traceback.print_exc()
     threading.Thread(target=_show, daemon=True).start()
 
 
@@ -450,7 +434,7 @@ def _run_compare():
                         diff(fa["bpm"], fb["bpm"])),
         ("Tom",         fa["dominant_key"],                      fb["dominant_key"],          "—"),
         ("Duração",     _fmt_dur(fa["duration_seconds"]),        _fmt_dur(fb["duration_seconds"]), "—"),
-        ("Gênero",      ca["genre"],                             cb["genre"],                 "—"),
+        ("Gênero",      ca.get("genre", "?"),                     cb.get("genre", "?"),        "—"),
         ("Subgênero",   ca.get("subgenre") or "—",               cb.get("subgenre") or "—",   "—"),
         ("Confiança",   _local_conf(ca),                         _local_conf(cb),             "—"),
         ("Graves",      f"{fa['bass_ratio']:.0%}",               f"{fb['bass_ratio']:.0%}",
@@ -478,9 +462,9 @@ def _run_compare():
     color  = _COMPAT_COLORS.get(rating, list(WHITE))
 
     dpg.set_value(W["compat_score"], f"{score}%")
-    dpg.configure_item(W["compat_score"], color=list(color))
+    dpg.configure_item(W["compat_score"], color=color)
     dpg.set_value(W["compat_rating"], rating)
-    dpg.configure_item(W["compat_rating"], color=list(color))
+    dpg.configure_item(W["compat_rating"], color=color)
     dpg.set_value(W["compat_bar"], score / 100)
 
     # Sub-scores
@@ -507,7 +491,7 @@ def _open_batch_folder():
                 _ui(dpg.configure_item, W["batch_exp_json"],    enabled=False)
                 threading.Thread(target=_run_batch, args=(folder,), daemon=True).start()
         except Exception as e:
-            import traceback; traceback.print_exc()
+            traceback.print_exc()
             _ui(dpg.set_value, W["batch_status"], f"Erro: {e}")
     threading.Thread(target=_pick, daemon=True).start()
 
@@ -534,13 +518,14 @@ def _run_batch(folder: str):
     for i, path in enumerate(files):
         _ui(dpg.set_value, W["batch_status"],
             f"{i+1}/{total} — {os.path.basename(path)[:50]}")
-        _ui(dpg.set_value, W["batch_progress"], (i + 1) / total)
+        _ui(dpg.set_value, W["batch_progress"], i / total)
         try:
             f = analyze_file(path)
             c = classify(f)
             results.append({"features": f, "classification": c, "path": path})
         except Exception as e:
             errors.append((os.path.basename(path), str(e)))
+        _ui(dpg.set_value, W["batch_progress"], (i + 1) / total)
 
     _batch_results = results
     _ui(_apply_batch_table, results, errors)
@@ -581,19 +566,19 @@ def _apply_batch_table(results: list[dict], errors: list):
         ext  = c.get("lastfm") or {}
         row  = dpg.add_table_row(parent=tbl)
         dpg.add_text(os.path.basename(f.get("file_path", ""))[:42], parent=row)
-        dpg.add_text(f"{f['bpm']:.1f}",                  parent=row, color=list(YELLOW))
-        dpg.add_text(f.get("dominant_key", "?"),          parent=row, color=list(PURPLE))
-        dpg.add_text(c.get("genre", "—"),                 parent=row, color=list(GREEN))
+        dpg.add_text(f"{f['bpm']:.1f}",                  parent=row, color=YELLOW)
+        dpg.add_text(f.get("dominant_key", "?"),          parent=row, color=PURPLE)
+        dpg.add_text(c.get("genre", "—"),                 parent=row, color=GREEN)
         dpg.add_text(c.get("subgenre") or "—",            parent=row)
-        dpg.add_text(f"{rule.get('score', 0):.0%}",       parent=row, color=list(ACCENT))
-        dpg.add_text(ext.get("method", "local").upper(),  parent=row, color=list(DIM))
+        dpg.add_text(f"{rule.get('score', 0):.0%}",       parent=row, color=ACCENT)
+        dpg.add_text(ext.get("method", "local").upper(),  parent=row, color=DIM)
         td = {"path": r["path"], "features": f, "classification": c}
         dpg.add_button(label="Vis.", callback=lambda _, __, td=td: _open_vis_from_batch(td), parent=row)
 
     for name, err in errors:
         row = dpg.add_table_row(parent=tbl)
-        dpg.add_text(f"[ERRO] {name[:42]}", parent=row, color=list(RED))
-        dpg.add_text(err[:20], parent=row, color=list(DIM))
+        dpg.add_text(f"[ERRO] {name[:42]}", parent=row, color=RED)
+        dpg.add_text(err[:20], parent=row, color=DIM)
         for _ in range(6):
             dpg.add_text("", parent=row)
 
@@ -610,26 +595,7 @@ def _export_batch(fmt: str):
         if not path:
             return
 
-        rows = []
-        for r in _batch_results:
-            f    = r["features"]
-            c    = r["classification"]
-            rule = (c.get("rule_based_candidates") or c.get("candidates") or [{}])[0]
-            ext  = c.get("lastfm") or {}
-            rows.append({
-                "file":              f.get("file_name"),
-                "bpm":               round(f.get("bpm", 0), 1),
-                "key":               f.get("dominant_key"),
-                "duration":          round(f.get("duration_seconds", 0), 1),
-                "genre_local":       rule.get("genre"),
-                "subgenre_local":    rule.get("subgenre"),
-                "confidence_local":  round(rule.get("score", 0), 3),
-                "genre_external":    ext.get("genre"),
-                "subgenre_external": ext.get("subgenre"),
-                "source_external":   ext.get("method"),
-                "bass_ratio":        round(f.get("bass_ratio", 0), 3),
-                "rms_mean":          round(f.get("rms_mean", 0), 4),
-            })
+        rows = [_build_export_row(r) for r in _batch_results]
 
         try:
             if fmt == "json":
@@ -650,6 +616,7 @@ def _export_batch(fmt: str):
 
 # ── Utilitário de thumbnail ───────────────────────────────────────────
 _cover_tex_counter = 0
+_cover_texture_tags: list[str] = []
 
 def _register_cover_texture(data: bytes, size: int = 48) -> str | None:
     """Converte bytes de imagem em texture DearPyGui. Retorna tag ou None."""
@@ -662,6 +629,7 @@ def _register_cover_texture(data: bytes, size: int = 48) -> str | None:
         tag = f"__cov_{_cover_tex_counter}__"
         _cover_tex_counter += 1
         dpg.add_static_texture(size, size, flat, tag=tag, parent="__covers__")
+        _cover_texture_tags.append(tag)
         return tag
     except Exception:
         return None
@@ -757,7 +725,6 @@ def _run_search():
 
             threading.Thread(target=_reader, daemon=True).start()
 
-            import time
             entries = []
             deadline = time.monotonic() + 90
             while True:
@@ -783,7 +750,7 @@ def _run_search():
             _ui(dpg.set_value, W["dl_search_status"],
                 f"{len(entries)} resultado(s)" if entries else "Nenhum resultado encontrado.")
         except Exception as e:
-            import traceback; traceback.print_exc()
+            traceback.print_exc()
             _ui(dpg.set_value, W["dl_search_status"], f"Erro: {e}")
         finally:
             if proc and proc.poll() is None:
@@ -835,10 +802,10 @@ def _apply_search_table(entries: list):
             url = ""
 
         row = dpg.add_table_row(parent=tbl)
-        dpg.add_text(str(i + 1), parent=row, color=list(DIM))
+        dpg.add_text(str(i + 1), parent=row, color=DIM)
         dpg.add_text(title,      parent=row)
-        dpg.add_text(uploader,   parent=row, color=list(DIM))
-        dpg.add_text(dur_str,    parent=row, color=list(YELLOW))
+        dpg.add_text(uploader,   parent=row, color=DIM)
+        dpg.add_text(dur_str,    parent=row, color=YELLOW)
         with dpg.group(horizontal=True, parent=row):
             dpg.add_button(
                 label="MP3",
@@ -912,10 +879,12 @@ def _dl_update_format_visibility():
 
 def _dl_append_log(line: str):
     global _dl_log_lines
-    _dl_log_lines.append(line)
-    if len(_dl_log_lines) > 300:
-        _dl_log_lines = _dl_log_lines[-300:]
-    _ui(dpg.set_value, W["dl_log"], "\n".join(_dl_log_lines))
+    with _dl_log_lock:
+        _dl_log_lines.append(line)
+        if len(_dl_log_lines) > 300:
+            _dl_log_lines = _dl_log_lines[-300:]
+        text = "\n".join(_dl_log_lines)
+    _ui(dpg.set_value, W["dl_log"], text)
 
 
 def _stop_download():
@@ -981,7 +950,8 @@ def _run_download(direct_url: str | None = None, direct_audio: bool | None = Non
                    "-o", os.path.join(dest, "%(title)s.%(ext)s"),
                    url]
 
-    _dl_log_lines = []
+    with _dl_log_lock:
+        _dl_log_lines = []
     _ui(dpg.set_value,      W["dl_log"],      "")
     _ui(dpg.set_value,      W["dl_status"],   "Iniciando download...")
     _ui(dpg.set_value,      W["dl_progress"], 0.0)
@@ -1023,7 +993,7 @@ def _run_download(direct_url: str | None = None, direct_audio: bool | None = Non
                 _ui(dpg.set_value, W["dl_status"],        f"Encerrado com erro (código {rc})")
                 _ui(dpg.set_value, W["dl_search_status"], f"Erro no download (código {rc})")
         except Exception as e:
-            import traceback; traceback.print_exc()
+            traceback.print_exc()
             _ui(dpg.set_value, W["dl_status"], f"Erro: {e}")
         finally:
             _dl_process = None
@@ -1034,13 +1004,13 @@ def _run_download(direct_url: str | None = None, direct_audio: bool | None = Non
 
 
 def _build_download_tab():
-    dpg.add_text("Baixar Música", color=list(ACCENT))
+    dpg.add_text("Baixar Música", color=ACCENT)
     dpg.add_separator()
     dpg.add_spacer(height=6)
 
     # ── Aviso de instalação ───────────────────────────────────────────
     with dpg.group(horizontal=True, show=not bool(_find_ytdlp())) as _warn:
-        dpg.add_text("  yt-dlp não encontrado.", color=list(YELLOW))
+        dpg.add_text("  yt-dlp não encontrado.", color=YELLOW)
         dpg.add_spacer(width=10)
         W["dl_install_btn"] = dpg.add_button(
             label=" Instalar yt-dlp ", callback=lambda *_: _dl_install_ytdlp(),
@@ -1060,7 +1030,7 @@ def _build_download_tab():
                 label=" Pesquisar ", callback=lambda *_: _run_search(),
             )
         dpg.add_spacer(height=4)
-        W["dl_search_status"] = dpg.add_text("", color=list(DIM))
+        W["dl_search_status"] = dpg.add_text("", color=DIM)
         dpg.add_spacer(height=4)
         W["dl_search_table_container"] = dpg.add_group()
 
@@ -1072,12 +1042,12 @@ def _build_download_tab():
         dpg.add_text(
             "Suporta YouTube, SoundCloud, Bandcamp e centenas de outros sites."
             " Playlists são detectadas automaticamente pela URL.",
-            color=list(DIM), wrap=700,
+            color=DIM, wrap=700,
         )
         dpg.add_spacer(height=8)
 
         with dpg.group(horizontal=True):
-            dpg.add_text("URL:", color=list(DIM))
+            dpg.add_text("URL:", color=DIM)
             W["dl_url"] = dpg.add_input_text(
                 width=-80, hint="https://youtube.com/watch?v=...",
             )
@@ -1086,7 +1056,7 @@ def _build_download_tab():
         dpg.add_spacer(height=8)
 
         with dpg.group(horizontal=True):
-            dpg.add_text("Tipo:", color=list(DIM))
+            dpg.add_text("Tipo:", color=DIM)
             W["dl_type"] = dpg.add_radio_button(
                 items=["Áudio", "Vídeo"],
                 default_value="Áudio",
@@ -1101,13 +1071,13 @@ def _build_download_tab():
         dpg.add_spacer(height=6)
 
         with dpg.group(horizontal=True) as _ag:
-            dpg.add_text("Formato:", color=list(DIM))
+            dpg.add_text("Formato:", color=DIM)
             W["dl_audio_fmt"] = dpg.add_combo(
                 items=["mp3", "m4a", "flac", "wav", "opus"],
                 default_value="mp3", width=90,
             )
             dpg.add_spacer(width=16)
-            dpg.add_text("Qualidade:", color=list(DIM))
+            dpg.add_text("Qualidade:", color=DIM)
             W["dl_audio_quality"] = dpg.add_combo(
                 items=["Melhor (320k)", "Alta (256k)", "Média (192k)", "Baixa (128k)"],
                 default_value="Melhor (320k)", width=150,
@@ -1115,13 +1085,13 @@ def _build_download_tab():
         W["dl_audio_grp"] = _ag
 
         with dpg.group(horizontal=True, show=False) as _vg:
-            dpg.add_text("Formato:", color=list(DIM))
+            dpg.add_text("Formato:", color=DIM)
             W["dl_video_fmt"] = dpg.add_combo(
                 items=["mp4", "webm", "mkv"],
                 default_value="mp4", width=90,
             )
             dpg.add_spacer(width=16)
-            dpg.add_text("Qualidade:", color=list(DIM))
+            dpg.add_text("Qualidade:", color=DIM)
             W["dl_video_quality"] = dpg.add_combo(
                 items=["Melhor", "1080p", "720p", "480p", "360p"],
                 default_value="Melhor", width=110,
@@ -1134,7 +1104,7 @@ def _build_download_tab():
             dpg.add_button(
                 label=" Pasta destino ", callback=lambda *_: _dl_pick_folder(),
             )
-            W["dl_dest_text"] = dpg.add_text(_dl_dest_folder, color=list(DIM))
+            W["dl_dest_text"] = dpg.add_text(_dl_dest_folder, color=DIM)
 
         dpg.add_spacer(height=10)
 
@@ -1147,11 +1117,11 @@ def _build_download_tab():
             )
 
         dpg.add_spacer(height=8)
-        W["dl_status"]   = dpg.add_text("", color=list(DIM))
+        W["dl_status"]   = dpg.add_text("", color=DIM)
         W["dl_progress"] = dpg.add_progress_bar(default_value=0.0, width=-1)
         dpg.add_spacer(height=6)
 
-        dpg.add_text("Log:", color=list(DIM))
+        dpg.add_text("Log:", color=DIM)
         W["dl_log"] = dpg.add_input_text(
             multiline=True, readonly=True, width=-1, height=200,
             default_value="",
@@ -1249,7 +1219,7 @@ def _run_tag():
 
             _ui(_apply_tag_table, results, dry_run)
         except Exception as e:
-            import traceback; traceback.print_exc()
+            traceback.print_exc()
             _ui(dpg.set_value, W["tag_status"], f"Erro: {e}")
         finally:
             _ui(dpg.configure_item, W["tag_run_btn"], enabled=True)
@@ -1279,7 +1249,7 @@ def _run_rename_only():
 
             _ui(_apply_rename_table, results, dry_run)
         except Exception as e:
-            import traceback; traceback.print_exc()
+            traceback.print_exc()
             _ui(dpg.set_value, W["tag_status"], f"Erro: {e}")
         finally:
             _ui(dpg.configure_item, W["tag_rename_btn"], enabled=True)
@@ -1288,6 +1258,13 @@ def _run_rename_only():
 
 
 def _apply_tag_table(results: list[dict], dry_run: bool):
+    for tex_tag in _cover_texture_tags:
+        try:
+            dpg.delete_item(tex_tag)
+        except Exception:
+            pass
+    _cover_texture_tags.clear()
+
     prev = W.get("tag_table")
     if prev:
         try:
@@ -1327,10 +1304,10 @@ def _apply_tag_table(results: list[dict], dry_run: bool):
     for r in results:
         row = dpg.add_table_row(parent=tbl)
         dpg.add_text((r.get("file") or "")[:38],  parent=row)
-        dpg.add_text(r.get("artist") or "—",     parent=row, color=list(ACCENT))
-        dpg.add_text(r.get("title") or "—",      parent=row, color=list(ACCENT2))
-        dpg.add_text(r.get("genre") or "—",      parent=row, color=list(GREEN))
-        dpg.add_text(r.get("year") or "—",       parent=row, color=list(YELLOW))
+        dpg.add_text(r.get("artist") or "—",     parent=row, color=ACCENT)
+        dpg.add_text(r.get("title") or "—",      parent=row, color=ACCENT2)
+        dpg.add_text(r.get("genre") or "—",      parent=row, color=GREEN)
+        dpg.add_text(r.get("year") or "—",       parent=row, color=YELLOW)
 
         cover_data = r.get("cover_preview")
         if cover_data:
@@ -1338,26 +1315,26 @@ def _apply_tag_table(results: list[dict], dry_run: bool):
             if tex:
                 dpg.add_image(tex, parent=row, width=48, height=48)
             else:
-                dpg.add_text("OK" if r.get("cover_written") else "img?", parent=row, color=list(GREEN))
+                dpg.add_text("OK" if r.get("cover_written") else "img?", parent=row, color=GREEN)
         elif r.get("cover_written"):
-            dpg.add_text("OK", parent=row, color=list(GREEN))
+            dpg.add_text("OK", parent=row, color=GREEN)
         else:
-            dpg.add_text("—", parent=row, color=list(DIM))
+            dpg.add_text("—", parent=row, color=DIM)
 
         if r.get("error") and not r.get("written"):
-            dpg.add_text(r["error"][:30], parent=row, color=list(RED))
+            dpg.add_text(r["error"][:30], parent=row, color=RED)
         elif r.get("written"):
             label = "preview" if dry_run else "OK"
-            dpg.add_text(label, parent=row, color=list(YELLOW if dry_run else GREEN))
+            dpg.add_text(label, parent=row, color=YELLOW if dry_run else GREEN)
         else:
-            dpg.add_text("—", parent=row, color=list(DIM))
+            dpg.add_text("—", parent=row, color=DIM)
 
         if has_rename:
             rto = r.get("rename_to") or ""
             if r.get("renamed") and rto and rto != r.get("file"):
-                dpg.add_text(rto[:38], parent=row, color=list(ACCENT))
+                dpg.add_text(rto[:38], parent=row, color=ACCENT)
             else:
-                dpg.add_text("—", parent=row, color=list(DIM))
+                dpg.add_text("—", parent=row, color=DIM)
 
 
 def _apply_rename_table(results: list[dict], dry_run: bool):
@@ -1397,74 +1374,74 @@ def _apply_rename_table(results: list[dict], dry_run: bool):
         new_name = r.get("new_name") or "—"
 
         if r.get("error"):
-            dpg.add_text(old_name[:45], parent=row, color=list(RED))
-            dpg.add_text("—",          parent=row, color=list(DIM))
-            dpg.add_text(r["error"][:30], parent=row, color=list(RED))
+            dpg.add_text(old_name[:45], parent=row, color=RED)
+            dpg.add_text("—",          parent=row, color=DIM)
+            dpg.add_text(r["error"][:30], parent=row, color=RED)
         elif r.get("renamed") and new_name != old_name:
-            dpg.add_text(old_name[:45], parent=row, color=list(DIM))
-            dpg.add_text(new_name[:45], parent=row, color=list(ACCENT))
+            dpg.add_text(old_name[:45], parent=row, color=DIM)
+            dpg.add_text(new_name[:45], parent=row, color=ACCENT)
             label = "preview" if dry_run else "OK"
-            dpg.add_text(label, parent=row, color=list(YELLOW if dry_run else GREEN))
+            dpg.add_text(label, parent=row, color=YELLOW if dry_run else GREEN)
         else:
-            dpg.add_text(old_name[:45], parent=row, color=list(DIM))
-            dpg.add_text("= igual",    parent=row, color=list(DIM))
-            dpg.add_text("—",          parent=row, color=list(DIM))
+            dpg.add_text(old_name[:45], parent=row, color=DIM)
+            dpg.add_text("= igual",    parent=row, color=DIM)
+            dpg.add_text("—",          parent=row, color=DIM)
 
 
 # ── Construtores UI ───────────────────────────────────────────────────
 def _build_info_panel(slot: str, label: str, color):
-    dpg.add_text(label, color=list(color))
-    W[f"file_{slot}"]   = dpg.add_text("Nenhum arquivo", color=list(DIM), wrap=290)
+    dpg.add_text(label, color=color)
+    W[f"file_{slot}"]   = dpg.add_text("Nenhum arquivo", color=DIM, wrap=290)
     W[f"status_{slot}"] = dpg.add_text("")
     dpg.add_button(label="  Abrir arquivo  ", callback=lambda *_: _open_file(slot))
     dpg.add_separator()
 
     for key, wkey in [("BPM", "bpm"), ("Tom", "tom"), ("Duração", "dur")]:
         with dpg.group(horizontal=True):
-            dpg.add_text(f"{key}:", color=list(DIM))
+            dpg.add_text(f"{key}:", color=DIM)
             W[f"{wkey}_{slot}"] = dpg.add_text("—")
 
     # Análise local
     dpg.add_spacer(height=8)
-    dpg.add_text("Análise local", color=list(ACCENT))
+    dpg.add_text("Análise local", color=ACCENT)
     dpg.add_separator()
     with dpg.group(horizontal=True):
-        dpg.add_text("Gênero:",    color=list(DIM))
+        dpg.add_text("Gênero:",    color=DIM)
         W[f"genero_{slot}"] = dpg.add_text("—")
     with dpg.group(horizontal=True):
-        dpg.add_text("Subgênero:", color=list(DIM))
+        dpg.add_text("Subgênero:", color=DIM)
         W[f"sub_{slot}"] = dpg.add_text("—")
     with dpg.group(horizontal=True):
-        dpg.add_text("Confiança:", color=list(DIM))
+        dpg.add_text("Confiança:", color=DIM)
         W[f"conf_{slot}"] = dpg.add_text("—")
-    dpg.add_text("Top candidatos:", color=list(DIM))
+    dpg.add_text("Top candidatos:", color=DIM)
     for i in range(3):
-        W[f"cand_{slot}_{i}"] = dpg.add_text("", color=list(WHITE), wrap=290)
+        W[f"cand_{slot}_{i}"] = dpg.add_text("", color=WHITE, wrap=290)
 
     # Spotify
     dpg.add_spacer(height=8)
-    dpg.add_text("Spotify", color=list(SP_GREEN))
+    dpg.add_text("Spotify", color=SP_GREEN)
     dpg.add_separator()
     with dpg.group(horizontal=True):
-        dpg.add_text("Gênero:",    color=list(DIM))
+        dpg.add_text("Gênero:",    color=DIM)
         W[f"sp_genre_{slot}"] = dpg.add_text("—")
     with dpg.group(horizontal=True):
-        dpg.add_text("Subgênero:", color=list(DIM))
+        dpg.add_text("Subgênero:", color=DIM)
         W[f"sp_sub_{slot}"] = dpg.add_text("—")
-    W[f"sp_tags_{slot}"]  = dpg.add_text("—", color=list(DIM), wrap=290)
-    W[f"sp_feats_{slot}"] = dpg.add_text("—", color=list(DIM), wrap=290)
+    W[f"sp_tags_{slot}"]  = dpg.add_text("—", color=DIM, wrap=290)
+    W[f"sp_feats_{slot}"] = dpg.add_text("—", color=DIM, wrap=290)
 
     # Last.fm
     dpg.add_spacer(height=8)
-    dpg.add_text("Last.fm", color=list(LFM_RED))
+    dpg.add_text("Last.fm", color=LFM_RED)
     dpg.add_separator()
     with dpg.group(horizontal=True):
-        dpg.add_text("Gênero:",    color=list(DIM))
+        dpg.add_text("Gênero:",    color=DIM)
         W[f"lfm_genre_{slot}"] = dpg.add_text("—")
     with dpg.group(horizontal=True):
-        dpg.add_text("Subgênero:", color=list(DIM))
+        dpg.add_text("Subgênero:", color=DIM)
         W[f"lfm_sub_{slot}"] = dpg.add_text("—")
-    W[f"lfm_tags_{slot}"] = dpg.add_text("—", color=list(DIM), wrap=290)
+    W[f"lfm_tags_{slot}"] = dpg.add_text("—", color=DIM, wrap=290)
 
     # Ações
     dpg.add_spacer(height=10)
@@ -1489,10 +1466,10 @@ def _build_info_panel(slot: str, label: str, color):
 
 
 def _build_spectrum(slot: str, color):
-    dpg.add_text("Espectro de Frequências", color=list(color))
+    dpg.add_text("Espectro de Frequências", color=color)
     dpg.add_separator()
     for i, bar_color in enumerate(_SPEC_COLORS):
-        W[f"barlbl_{slot}_{i}"] = dpg.add_text("—", color=list(bar_color))
+        W[f"barlbl_{slot}_{i}"] = dpg.add_text("—", color=bar_color)
         pb = dpg.add_progress_bar(default_value=0.0, width=-1)
         with dpg.theme() as _t:
             with dpg.theme_component(dpg.mvProgressBar):
@@ -1502,7 +1479,7 @@ def _build_spectrum(slot: str, color):
         dpg.add_spacer(height=2)
 
     dpg.add_spacer(height=8)
-    dpg.add_text("Waveform", color=list(DIM))
+    dpg.add_text("Waveform", color=DIM)
     _x0 = list(range(_WAVE_N))
     _y0 = [0.0] * _WAVE_N
     with dpg.plot(height=100, width=-1, no_title=True, no_mouse_pos=True) as _plot:
@@ -1531,15 +1508,16 @@ def _build_spectrum(slot: str, color):
 
 def _train_log_append(msg: str):
     global _train_log_lines
-    _train_log_lines.append(msg)
-    if len(_train_log_lines) > 300:
-        _train_log_lines = _train_log_lines[-300:]
-    dpg.set_value(W["train_log"], "\n".join(_train_log_lines))
+    with _train_log_lock:
+        _train_log_lines.append(msg)
+        if len(_train_log_lines) > 300:
+            _train_log_lines = _train_log_lines[-300:]
+        text = "\n".join(_train_log_lines)
+    dpg.set_value(W["train_log"], text)
 
 
 def _train_update_model_info():
     if os.path.exists("model.pkl"):
-        import time
         mtime = os.path.getmtime("model.pkl")
         ts    = time.strftime("%d/%m/%Y %H:%M", time.localtime(mtime))
         dpg.set_value(W["train_model_info"], f"model.pkl encontrado  ({ts})")
@@ -1555,7 +1533,8 @@ CHECKPOINT_INTERVAL = 50  # salva progresso a cada N faixas
 def _on_train_restart():
     from trainer import clear_checkpoint, CHECKPOINT_PATH
     clear_checkpoint()
-    _train_log_lines.clear()
+    with _train_log_lock:
+        _train_log_lines.clear()
     dpg.set_value(W["train_log"], "")
     dpg.set_value(W["train_status"], "Checkpoint removido. Pronto para recomecar do zero.")
 
@@ -1581,7 +1560,8 @@ def _run_train_thread(dataset_dir: str, n_estimators: int):
         _ui(dpg.configure_item, W["train_btn"], enabled=False)
         _ui(dpg.configure_item, W["train_pause_btn"], enabled=True)
         _ui(dpg.configure_item, W["train_restart_btn"], enabled=False)
-        _train_log_lines.clear()
+        with _train_log_lock:
+            _train_log_lines.clear()
         _ui(dpg.set_value, W["train_log"], "")
         _ui(dpg.set_value, W["train_status"], "Verificando checkpoint...")
 
@@ -1674,7 +1654,7 @@ def _run_train_thread(dataset_dir: str, n_estimators: int):
         _ui(_train_update_model_info)
 
     except Exception as e:
-        import traceback; traceback.print_exc()
+        traceback.print_exc()
         log(f"Erro: {e}")
         _ui(dpg.set_value, W["train_status"], f"Erro: {e}")
     finally:
@@ -1754,39 +1734,42 @@ def _apply_audit_table(suspects: list, total: int, errors: int):
         dpg.add_table_column(label="Confianca",     width_fixed=True, init_width_or_weight=80)
         for s in suspects:
             with dpg.table_row():
-                dpg.add_text(s['file'],           color=list(WHITE))
-                dpg.add_text(f"{s['declared_genre']} / {s['declared_subgenre']}", color=list(DIM))
-                dpg.add_text(f"{s['model_genre']} / {s['model_subgenre']}",       color=list(YELLOW))
-                dpg.add_text(f"{s['confidence']:.0%}", color=list(ACCENT))
+                dpg.add_text(s['file'],           color=WHITE)
+                dpg.add_text(f"{s['declared_genre']} / {s['declared_subgenre']}", color=DIM)
+                dpg.add_text(f"{s['model_genre']} / {s['model_subgenre']}",       color=YELLOW)
+                dpg.add_text(f"{s['confidence']:.0%}", color=ACCENT)
 
 
 def _export_audit():
     if not _audit_results:
         return
-    path = _win_save_file("Exportar auditoria", "CSV\0*.csv\0", "csv")
-    if not path:
-        return
-    import csv as _csv
-    with open(path, 'w', newline='', encoding='utf-8') as fp:
-        writer = _csv.DictWriter(fp, fieldnames=list(_audit_results[0].keys()))
-        writer.writeheader()
-        writer.writerows(_audit_results)
-    dpg.set_value(W["audit_status"], f"Exportado: {os.path.basename(path)}")
+
+    def _do():
+        path = _win_save_file("Exportar auditoria", "CSV\0*.csv\0", "csv")
+        if not path:
+            return
+        with open(path, 'w', newline='', encoding='utf-8') as fp:
+            writer = csv.DictWriter(fp, fieldnames=list(_audit_results[0].keys()))
+            writer.writeheader()
+            writer.writerows(_audit_results)
+        _ui(dpg.set_value, W["audit_status"], f"Exportado: {os.path.basename(path)}")
+
+    threading.Thread(target=_do, daemon=True).start()
 
 
 def _build_train_tab():
-    dpg.add_text("Treinar Modelo ML", color=list(ACCENT))
+    dpg.add_text("Treinar Modelo ML", color=ACCENT)
     dpg.add_separator()
     dpg.add_spacer(height=6)
     dpg.add_text(
         "Estrutura aceita:  pasta/Genero/Subgenero/arquivo.mp3  ou  pasta/Subgenero/arquivo.mp3",
-        color=list(DIM), wrap=750,
+        color=DIM, wrap=750,
     )
     dpg.add_spacer(height=8)
 
     # Dataset e estimators
     with dpg.group(horizontal=True):
-        dpg.add_text("Dataset:", color=list(DIM))
+        dpg.add_text("Dataset:", color=DIM)
         W["train_folder_text"] = dpg.add_input_text(
             hint="Pasta raiz do dataset", width=420, readonly=True,
         )
@@ -1799,11 +1782,11 @@ def _build_train_tab():
 
     dpg.add_spacer(height=6)
     with dpg.group(horizontal=True):
-        dpg.add_text("Arvores (estimators):", color=list(DIM))
+        dpg.add_text("Arvores (estimators):", color=DIM)
         W["train_estimators"] = dpg.add_slider_int(
             min_value=50, max_value=500, default_value=200, width=200,
         )
-        dpg.add_text("(mais = mais preciso, mais lento)", color=list(DIM))
+        dpg.add_text("(mais = mais preciso, mais lento)", color=DIM)
 
     dpg.add_spacer(height=8)
     with dpg.group(horizontal=True):
@@ -1828,10 +1811,10 @@ def _build_train_tab():
             callback=_on_train_restart,
         )
         dpg.add_spacer(width=16)
-        W["train_model_info"] = dpg.add_text("", color=list(DIM))
+        W["train_model_info"] = dpg.add_text("", color=DIM)
 
     dpg.add_spacer(height=4)
-    W["train_status"] = dpg.add_text("", color=list(DIM))
+    W["train_status"] = dpg.add_text("", color=DIM)
     dpg.add_spacer(height=4)
     W["train_log"] = dpg.add_input_text(
         multiline=True, readonly=True, width=-1, height=160,
@@ -1839,17 +1822,17 @@ def _build_train_tab():
     )
 
     dpg.add_spacer(height=16)
-    dpg.add_text("Auditar Dataset", color=list(ACCENT2))
+    dpg.add_text("Auditar Dataset", color=ACCENT2)
     dpg.add_separator()
     dpg.add_spacer(height=6)
     dpg.add_text(
         "Analisa cada faixa com o modelo e lista suspeitos de rótulo errado (alta confiança + discordância).",
-        color=list(DIM), wrap=750,
+        color=DIM, wrap=750,
     )
     dpg.add_spacer(height=8)
 
     with dpg.group(horizontal=True):
-        dpg.add_text("Dataset:", color=list(DIM))
+        dpg.add_text("Dataset:", color=DIM)
         W["audit_folder_text"] = dpg.add_input_text(
             hint="Mesma pasta do treino", width=420, readonly=True,
         )
@@ -1862,12 +1845,12 @@ def _build_train_tab():
 
     dpg.add_spacer(height=6)
     with dpg.group(horizontal=True):
-        dpg.add_text("Confianca minima:", color=list(DIM))
+        dpg.add_text("Confianca minima:", color=DIM)
         W["audit_threshold"] = dpg.add_slider_float(
             min_value=0.5, max_value=1.0, default_value=0.8,
             format="%.2f", width=200,
         )
-        dpg.add_text("(so reporta se o modelo tiver alta certeza)", color=list(DIM))
+        dpg.add_text("(so reporta se o modelo tiver alta certeza)", color=DIM)
 
     dpg.add_spacer(height=8)
     with dpg.group(horizontal=True):
@@ -1887,7 +1870,7 @@ def _build_train_tab():
         )
 
     dpg.add_spacer(height=4)
-    W["audit_status"] = dpg.add_text("", color=list(DIM))
+    W["audit_status"] = dpg.add_text("", color=DIM)
     dpg.add_spacer(height=6)
     W["audit_table_container"] = dpg.add_group()
 
@@ -1904,21 +1887,21 @@ def _build_compare_table():
         for i in range(10):
             with dpg.table_row():
                 W[f"cmp_lbl_{i}"] = dpg.add_text("")
-                W[f"cmp_a_{i}"]   = dpg.add_text("", color=list(ACCENT))
-                W[f"cmp_b_{i}"]   = dpg.add_text("", color=list(ACCENT2))
-                W[f"cmp_d_{i}"]   = dpg.add_text("", color=list(WHITE))
+                W[f"cmp_a_{i}"]   = dpg.add_text("", color=ACCENT)
+                W[f"cmp_b_{i}"]   = dpg.add_text("", color=ACCENT2)
+                W[f"cmp_d_{i}"]   = dpg.add_text("", color=WHITE)
 
     # ── Painel de Compatibilidade DJ ──────────────────────────────
     dpg.add_spacer(height=10)
     dpg.add_separator()
     dpg.add_spacer(height=6)
-    dpg.add_text("Compatibilidade para Mixagem", color=list(ACCENT))
+    dpg.add_text("Compatibilidade para Mixagem", color=ACCENT)
     dpg.add_spacer(height=6)
 
     with dpg.group(horizontal=True):
-        W["compat_score"]  = dpg.add_text("—", color=list(DIM))
+        W["compat_score"]  = dpg.add_text("—", color=DIM)
         dpg.add_spacer(width=8)
-        W["compat_rating"] = dpg.add_text("", color=list(DIM))
+        W["compat_rating"] = dpg.add_text("", color=DIM)
 
     W["compat_bar"] = dpg.add_progress_bar(default_value=0.0, width=-1)
     dpg.add_spacer(height=8)
@@ -1932,29 +1915,29 @@ def _build_compare_table():
                             ("Energia (20%)", "compat_energy"),
                             ("Gênero (15%)", "compat_genre")]:
             with dpg.table_row():
-                dpg.add_text(label, color=list(DIM))
-                W[wkey] = dpg.add_text("—", color=list(WHITE))
+                dpg.add_text(label, color=DIM)
+                W[wkey] = dpg.add_text("—", color=WHITE)
 
     dpg.add_spacer(height=8)
-    dpg.add_text("Dicas", color=list(ACCENT))
-    W["compat_tips"] = dpg.add_text("", color=list(DIM), wrap=500)
+    dpg.add_text("Dicas", color=ACCENT)
+    W["compat_tips"] = dpg.add_text("", color=DIM, wrap=500)
 
 
 def _build_tag_tab():
-    dpg.add_text("Auto-tagging & Rename", color=list(ACCENT))
+    dpg.add_text("Auto-tagging & Rename", color=ACCENT)
     dpg.add_separator()
     dpg.add_spacer(height=6)
     dpg.add_text(
         "Lê o nome do arquivo (\"Artista - Título.ext\"), grava tags ID3/Vorbis "
         "e pode renomear o arquivo limpando lixo do nome.",
-        color=list(DIM), wrap=700,
+        color=DIM, wrap=700,
     )
     dpg.add_spacer(height=8)
 
     with dpg.group(horizontal=True):
         dpg.add_button(label="  Arquivo  ", callback=lambda *_: _open_tag_target())
         dpg.add_button(label="  Pasta  ",   callback=lambda *_: _open_tag_folder())
-        W["tag_target_text"] = dpg.add_text("Nenhum alvo selecionado", color=list(DIM))
+        W["tag_target_text"] = dpg.add_text("Nenhum alvo selecionado", color=DIM)
 
     dpg.add_spacer(height=6)
     with dpg.group(horizontal=True):
@@ -1983,17 +1966,17 @@ def _build_tag_tab():
         )
         dpg.add_spacer(width=16)
         dpg.add_text("Só renomear: limpa lixo do nome sem buscar tags online",
-                     color=list(DIM))
+                     color=DIM)
 
     dpg.add_spacer(height=8)
-    W["tag_status"]   = dpg.add_text("", color=list(DIM))
+    W["tag_status"]   = dpg.add_text("", color=DIM)
     W["tag_progress"] = dpg.add_progress_bar(default_value=0.0, width=-1)
     dpg.add_spacer(height=6)
     W["tag_table_container"] = dpg.add_group()
 
 
 def _build_batch_tab():
-    dpg.add_text("Análise em Lote", color=list(ACCENT))
+    dpg.add_text("Análise em Lote", color=ACCENT)
     dpg.add_separator()
     dpg.add_spacer(height=6)
 
@@ -2001,10 +1984,10 @@ def _build_batch_tab():
         dpg.add_button(label="  Selecionar pasta  ",
                        callback=lambda *_: _open_batch_folder())
         W["batch_folder_text"] = dpg.add_text("Nenhuma pasta selecionada",
-                                               color=list(DIM))
+                                               color=DIM)
 
     dpg.add_spacer(height=8)
-    W["batch_status"]   = dpg.add_text("", color=list(DIM))
+    W["batch_status"]   = dpg.add_text("", color=DIM)
     W["batch_progress"] = dpg.add_progress_bar(default_value=0.0, width=-1)
 
     dpg.add_spacer(height=6)
@@ -2042,17 +2025,17 @@ def _build_splash():
         dpg.bind_item_theme("splash_window", _t)
 
         dpg.add_spacer(height=28)
-        dpg.add_text(APP_NAME,        color=list(ACCENT),  indent=20)
-        dpg.add_text(APP_DESCRIPTION, color=list(DIM),     indent=20)
+        dpg.add_text(APP_NAME,        color=ACCENT,  indent=20)
+        dpg.add_text(APP_DESCRIPTION, color=DIM,     indent=20)
         dpg.add_spacer(height=6)
         dpg.add_separator()
         dpg.add_spacer(height=10)
-        dpg.add_text(COMPANY_NAME,    color=list(PURPLE),  indent=20)
-        dpg.add_text(f"Versão {APP_VERSION}", color=list(DIM), indent=20)
+        dpg.add_text(COMPANY_NAME,    color=PURPLE,  indent=20)
+        dpg.add_text(f"Versão {APP_VERSION}", color=DIM, indent=20)
         dpg.add_spacer(height=28)
         dpg.add_separator()
         dpg.add_spacer(height=8)
-        dpg.add_text(APP_COPYRIGHT,   color=list(DIM),     indent=20)
+        dpg.add_text(APP_COPYRIGHT,   color=DIM,     indent=20)
         dpg.add_spacer(height=20)
         with dpg.group(horizontal=True):
             dpg.add_spacer(width=sw - 160)
@@ -2065,8 +2048,8 @@ def _build_splash():
 # ── Sobre ─────────────────────────────────────────────────────────────
 def _build_about_tab():
     dpg.add_spacer(height=20)
-    dpg.add_text(APP_NAME,        color=list(ACCENT))
-    dpg.add_text(APP_DESCRIPTION, color=list(DIM))
+    dpg.add_text(APP_NAME,        color=ACCENT)
+    dpg.add_text(APP_DESCRIPTION, color=DIM)
     dpg.add_spacer(height=4)
     dpg.add_separator()
     dpg.add_spacer(height=10)
@@ -2076,30 +2059,30 @@ def _build_about_tab():
         dpg.add_table_column()
 
         with dpg.table_row():
-            dpg.add_text("Versão",   color=list(DIM))
-            dpg.add_text(APP_VERSION, color=list(WHITE))
+            dpg.add_text("Versão",   color=DIM)
+            dpg.add_text(APP_VERSION, color=WHITE)
         with dpg.table_row():
-            dpg.add_text("Empresa",  color=list(DIM))
-            dpg.add_text(COMPANY_NAME, color=list(PURPLE))
+            dpg.add_text("Empresa",  color=DIM)
+            dpg.add_text(COMPANY_NAME, color=PURPLE)
         with dpg.table_row():
-            dpg.add_text("Plataforma", color=list(DIM))
-            dpg.add_text("Windows  /  Python 3.13  /  DearPyGui 2.x", color=list(WHITE))
+            dpg.add_text("Plataforma", color=DIM)
+            dpg.add_text("Windows  /  Python 3.13  /  DearPyGui 2.x", color=WHITE)
         with dpg.table_row():
-            dpg.add_text("Análise",  color=list(DIM))
-            dpg.add_text("librosa  /  scikit-learn (Random Forest)", color=list(WHITE))
+            dpg.add_text("Análise",  color=DIM)
+            dpg.add_text("librosa  /  scikit-learn (Random Forest)", color=WHITE)
         with dpg.table_row():
-            dpg.add_text("APIs",     color=list(DIM))
-            dpg.add_text("Last.fm  /  Spotify  /  Discogs", color=list(WHITE))
+            dpg.add_text("APIs",     color=DIM)
+            dpg.add_text("Last.fm  /  Spotify  /  Discogs", color=WHITE)
 
     dpg.add_spacer(height=16)
     dpg.add_separator()
     dpg.add_spacer(height=10)
-    dpg.add_text(APP_COPYRIGHT, color=list(DIM))
+    dpg.add_text(APP_COPYRIGHT, color=DIM)
     dpg.add_spacer(height=6)
     dpg.add_text(
         "Este software é propriedade exclusiva da Techbak Solutions.\n"
         "Uso não autorizado é proibido.",
-        color=list(DIM),
+        color=DIM,
     )
 
 
@@ -2160,7 +2143,7 @@ def launch():
     dpg.bind_theme(global_theme)
 
     with dpg.window(tag="main_window", no_title_bar=True, no_move=True, no_resize=True):
-        dpg.add_text("Music Analyzer", color=list(ACCENT))
+        dpg.add_text("Music Analyzer", color=ACCENT)
         dpg.add_separator()
 
         with dpg.tab_bar():
@@ -2182,12 +2165,12 @@ def launch():
                         _build_spectrum("B", ACCENT2)
 
                     with dpg.child_window(border=True):
-                        dpg.add_text("Comparação de Faixas", color=list(ACCENT))
+                        dpg.add_text("Comparação de Faixas", color=ACCENT)
                         dpg.add_text(
                             "Carregue Faixa A na aba Analisar e Faixa B aqui.",
-                            color=list(DIM),
+                            color=DIM,
                         )
-                        W["compare_titles"] = dpg.add_text("", color=list(DIM))
+                        W["compare_titles"] = dpg.add_text("", color=DIM)
                         dpg.add_spacer(height=4)
                         W["btn_compare"] = dpg.add_button(
                             label="  Comparar agora  ",
@@ -2235,7 +2218,7 @@ def launch():
         try:
             _process_ui_queue()
         except Exception:
-            import traceback; traceback.print_exc()
+            traceback.print_exc()
         if dpg.does_item_exist("splash_window"):
             _splash_frames[0] += 1
             if _splash_frames[0] >= 240:  # ~4 segundos a 60fps

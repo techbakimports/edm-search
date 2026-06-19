@@ -21,7 +21,6 @@ import os
 import json
 import csv
 import sys
-import math
 from datetime import datetime
 
 import numpy as np
@@ -29,7 +28,6 @@ from rich.console import Console
 from rich.table import Table
 from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn
-from rich.columns import Columns
 from rich.text import Text
 from rich import box
 
@@ -142,10 +140,6 @@ def compare_tracks(path1: str, path2: str):
     table.add_row("Subgênero",  c1['subgenre'] or "—", c2['subgenre'] or "—", "—")
     table.add_row("Confiança",  f"{c1['confidence']:.0%}", f"{c2['confidence']:.0%}", "—")
 
-    e1_bass  = f1['energy_sub_bass'] + f1['energy_bass']
-    e2_bass  = f2['energy_sub_bass'] + f2['energy_bass']
-    e1_high  = f1['energy_high']
-    e2_high  = f2['energy_high']
     table.add_row("Graves",     f"{f1['bass_ratio']:.0%}", f"{f2['bass_ratio']:.0%}", diff(f1['bass_ratio'], f2['bass_ratio'], ".0%", ""))
     table.add_row("Brilho",     f"{f1['spectral_centroid_mean']:.0f}Hz", f"{f2['spectral_centroid_mean']:.0f}Hz",
                   diff(f1['spectral_centroid_mean'], f2['spectral_centroid_mean'], ".0f", "Hz"))
@@ -165,8 +159,6 @@ def compare_tracks(path1: str, path2: str):
         color = "cyan"
     elif score >= 50:
         color = "yellow"
-    elif score >= 30:
-        color = "red"
     else:
         color = "red"
 
@@ -383,9 +375,9 @@ def analyze_batch(folder: str, export: str = None, plot: bool = False) -> list[d
         _export_results(results, folder, export)
 
     if plot:
+        from visualizer import plot_analysis
         for r in results:
             try:
-                from visualizer import plot_analysis
                 path = r['features']['file_path']
                 save = os.path.splitext(path)[0] + '_analysis.png'
                 plot_analysis(path, r['features'], r['classification'], save_path=save)
@@ -400,41 +392,30 @@ def _export_results(results: list[dict], folder: str, fmt: str):
     ts = datetime.now().strftime('%Y%m%d_%H%M%S')
     out_path = os.path.join(folder, f"edm_analysis_{ts}.{fmt}")
 
+    rows = []
+    for r in results:
+        f, c = r['features'], r['classification']
+        rows.append({
+            'file': f.get('file_name'),
+            'bpm': f.get('bpm'),
+            'key': f.get('dominant_key'),
+            'duration': f.get('duration_seconds'),
+            'genre': c.get('genre'),
+            'subgenre': c.get('subgenre'),
+            'confidence': c.get('confidence'),
+            'method': c.get('method'),
+        })
+
     if fmt == 'json':
-        rows = []
-        for r in results:
-            f, c = r['features'], r['classification']
-            rows.append({
-                'file': f.get('file_name'),
-                'bpm': f.get('bpm'),
-                'key': f.get('dominant_key'),
-                'duration': f.get('duration_seconds'),
-                'genre': c.get('genre'),
-                'subgenre': c.get('subgenre'),
-                'confidence': c.get('confidence'),
-                'method': c.get('method'),
-            })
         with open(out_path, 'w', encoding='utf-8') as fp:
             json.dump(rows, fp, ensure_ascii=False, indent=2)
 
     elif fmt == 'csv':
         with open(out_path, 'w', newline='', encoding='utf-8') as fp:
-            writer = csv.DictWriter(fp, fieldnames=[
-                'file', 'bpm', 'key', 'duration', 'genre', 'subgenre', 'confidence', 'method'
-            ])
+            fields = ['file', 'bpm', 'key', 'duration', 'genre', 'subgenre', 'confidence', 'method']
+            writer = csv.DictWriter(fp, fieldnames=fields)
             writer.writeheader()
-            for r in results:
-                f, c = r['features'], r['classification']
-                writer.writerow({
-                    'file': f.get('file_name'),
-                    'bpm': f.get('bpm'),
-                    'key': f.get('dominant_key'),
-                    'duration': f.get('duration_seconds'),
-                    'genre': c.get('genre'),
-                    'subgenre': c.get('subgenre'),
-                    'confidence': c.get('confidence'),
-                    'method': c.get('method'),
-                })
+            writer.writerows(rows)
 
     console.print(f"[green]Exportado: {out_path}[/green]")
 
@@ -619,8 +600,9 @@ def audit_command(dataset_dir: str, threshold: float = 0.8, export_fmt: str = No
                             'model_subgenre':    top['subgenre'],
                             'confidence':        conf,
                         })
-            except Exception:
+            except Exception as e:
                 errors += 1
+                console.print(f"[red]  ✗ {os.path.basename(path)}: {e}[/red]")
             progress.advance(task)
 
     console.print()

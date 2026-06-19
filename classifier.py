@@ -4,9 +4,10 @@ Fase 1: rule-based com scoring por features.
 Fase 3: ML (Random Forest) treinado com dataset rotulado.
 """
 import os
-import json
 import numpy as np
 from config import GENRE_TAXONOMY, BPM_TOLERANCE, SPECTRAL_THRESHOLDS
+
+_MODEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'model.pkl')
 
 
 def _derive_tags(features: dict) -> set:
@@ -29,7 +30,7 @@ def _derive_tags(features: dict) -> set:
         tags.add('dark')
 
     bass_ratio = features.get('bass_ratio', 0)
-    if bass_ratio >= 0.55:
+    if bass_ratio >= t.get('bass_heavy_rolloff', 0.55):
         tags.add('bass_heavy')
 
     zcr = features.get('zcr_mean', 0)
@@ -60,7 +61,6 @@ def _derive_tags(features: dict) -> set:
     if contrast >= 20:
         tags.add('punchy')
 
-    chroma_std = features.get('chroma_std', 0)
     if chroma_std >= 0.2:
         tags.add('melodic')
 
@@ -98,7 +98,7 @@ def _derive_tags(features: dict) -> set:
 _NEGATION_PREFIX = "no_"
 
 
-def _score_candidate(bpm: float, features: dict, genre_entry: tuple) -> float:
+def _score_candidate(bpm: float, features: dict, genre_entry: tuple, faixa_tags: set) -> float:
     """Calcula um score de 0–1 para o quão bem a faixa se encaixa num gênero."""
     _, _, bpm_min, bpm_max, genre_tags = genre_entry
 
@@ -109,8 +109,6 @@ def _score_candidate(bpm: float, features: dict, genre_entry: tuple) -> float:
     if bpm_dist > bpm_range:
         return 0.0
     bpm_score = 1.0 - (bpm_dist / bpm_range)
-
-    faixa_tags = _derive_tags(features)
 
     # Separar tags positivas e negativas (exclusões)
     positive_tags = [t for t in genre_tags if not t.startswith(_NEGATION_PREFIX)]
@@ -143,6 +141,7 @@ def classify_rule_based(features: dict, top_n: int = 5) -> list[dict]:
     # Testa três hipóteses de oitava: BPM detectado, metade e dobro.
     # Librosa frequentemente erra por fator 2 (half-time / double-time).
     bpm_hypotheses = {raw_bpm, raw_bpm / 2, raw_bpm * 2}
+    faixa_tags = _derive_tags(features)
 
     best: dict[tuple, dict] = {}  # (genre, subgenre) → melhor resultado
 
@@ -151,7 +150,7 @@ def classify_rule_based(features: dict, top_n: int = 5) -> list[dict]:
             continue
         for entry in GENRE_TAXONOMY:
             genre, subgenre, bpm_min, bpm_max, _ = entry
-            score = _score_candidate(test_bpm, features, entry)
+            score = _score_candidate(test_bpm, features, entry, faixa_tags)
             if score <= 0:
                 continue
             key = (genre, subgenre)
@@ -169,11 +168,10 @@ def classify_rule_based(features: dict, top_n: int = 5) -> list[dict]:
     return scores[:top_n]
 
 
-def classify_ml(features: dict, model_path: str = 'model.pkl') -> list[dict]:
+def classify_ml(features: dict, model_path: str = _MODEL_PATH) -> list[dict]:
     """Classifica usando modelo ML treinado. Requer treino prévio com train.py."""
     try:
         import pickle
-        from sklearn.preprocessing import StandardScaler
 
         with open(model_path, 'rb') as f:
             bundle = pickle.load(f)
@@ -212,7 +210,7 @@ def classify(features: dict, use_ml: bool = True) -> dict:
     rule_results = classify_rule_based(features)
     ml_results = []
 
-    if use_ml and os.path.exists('model.pkl'):
+    if use_ml and os.path.exists(_MODEL_PATH):
         ml_results = classify_ml(features)
 
     primary = ml_results if ml_results else rule_results

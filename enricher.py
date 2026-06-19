@@ -4,6 +4,7 @@ Lê artist/title dos metadados do arquivo e busca tags/gêneros externos.
 """
 import base64
 import json
+import threading
 import time
 import urllib.request
 import urllib.parse
@@ -132,7 +133,7 @@ _TAG_MAP = [
     ("glitch",                   ("Experimental",  "Glitch")),
 ]
 
-_TAG_LOOKUP: dict[str, tuple[str, str]] = {tag: genre for tag, genre in _TAG_MAP}
+_TAG_LOOKUP: dict[str, tuple[str, str]] = {tag: mapping for tag, mapping in _TAG_MAP}
 
 
 def read_metadata(path: str) -> tuple[str | None, str | None]:
@@ -151,9 +152,10 @@ def read_metadata(path: str) -> tuple[str | None, str | None]:
 
 
 def _lastfm_request(params: dict) -> dict:
-    params.update({'api_key': LASTFM_API_KEY, 'format': 'json'})
-    url = 'https://ws.audioscrobbler.com/2.0/?' + urllib.parse.urlencode(params)
-    with urllib.request.urlopen(url, timeout=6) as resp:
+    full_params = {**params, 'api_key': LASTFM_API_KEY, 'format': 'json'}
+    url = 'https://ws.audioscrobbler.com/2.0/?' + urllib.parse.urlencode(full_params)
+    req = urllib.request.Request(url, headers={'User-Agent': 'EDMAnalyzer/1.0 (edm-search)'})
+    with urllib.request.urlopen(req, timeout=6) as resp:
         return json.loads(resp.read().decode())
 
 
@@ -201,29 +203,31 @@ def map_tags(tags: list[tuple[str, int]]) -> tuple[str | None, str | None, float
 
 _sp_token: str | None = None
 _sp_token_expires: float = 0.0
+_sp_lock = threading.Lock()
 
 
 def _spotify_token() -> str | None:
     global _sp_token, _sp_token_expires
     if not SPOTIFY_CLIENT_ID or not SPOTIFY_CLIENT_SECRET:
         return None
-    if _sp_token and time.time() < _sp_token_expires - 60:
+    with _sp_lock:
+        if _sp_token and time.time() < _sp_token_expires - 60:
+            return _sp_token
+        creds = base64.b64encode(f"{SPOTIFY_CLIENT_ID}:{SPOTIFY_CLIENT_SECRET}".encode()).decode()
+        req = urllib.request.Request(
+            'https://accounts.spotify.com/api/token',
+            data=urllib.parse.urlencode({'grant_type': 'client_credentials'}).encode(),
+            headers={
+                'Authorization': f'Basic {creds}',
+                'Content-Type': 'application/x-www-form-urlencoded',
+            },
+            method='POST',
+        )
+        with urllib.request.urlopen(req, timeout=6) as resp:
+            data = json.loads(resp.read().decode())
+        _sp_token = data['access_token']
+        _sp_token_expires = time.time() + data.get('expires_in', 3600)
         return _sp_token
-    creds = base64.b64encode(f"{SPOTIFY_CLIENT_ID}:{SPOTIFY_CLIENT_SECRET}".encode()).decode()
-    req = urllib.request.Request(
-        'https://accounts.spotify.com/api/token',
-        data=urllib.parse.urlencode({'grant_type': 'client_credentials'}).encode(),
-        headers={
-            'Authorization': f'Basic {creds}',
-            'Content-Type': 'application/x-www-form-urlencoded',
-        },
-        method='POST',
-    )
-    with urllib.request.urlopen(req, timeout=6) as resp:
-        data = json.loads(resp.read().decode())
-    _sp_token = data['access_token']
-    _sp_token_expires = time.time() + data.get('expires_in', 3600)
-    return _sp_token
 
 
 def _spotify_get(endpoint: str, token: str) -> dict:
@@ -334,7 +338,11 @@ def enrich(path: str) -> dict | None:
             'top_tags': sp_genres[:5],
         })
     else:
-        return None  # nenhuma fonte retornou gênero mapeável
+        if not sp_features:
+            return None
+        # Sem gênero mapeável, mas temos audio features do Spotify
+        result['spotify_features'] = sp_features
+        return result
 
-    result['spotify_features'] = sp_features  # sempre inclui se disponível
+    result['spotify_features'] = sp_features
     return result

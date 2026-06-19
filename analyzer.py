@@ -4,7 +4,6 @@ Extração de features de áudio usando librosa.
 import contextlib
 import librosa
 import numpy as np
-import soundfile as sf
 import os
 
 from config import SUPPORTED_FORMATS
@@ -68,7 +67,7 @@ def load_audio(path: str, duration: float = 60.0):
 def detect_bpm(y, sr) -> tuple[float, np.ndarray]:
     """Detecta BPM e retorna (bpm, beat_frames)."""
     tempo, beat_frames = librosa.beat.beat_track(y=y, sr=sr, units='frames')
-    bpm = float(np.round(tempo, 1))
+    bpm = round(float(np.atleast_1d(tempo).flat[0]), 1)
     return bpm, beat_frames
 
 
@@ -147,7 +146,7 @@ def extract_features(y, sr) -> dict:
         features[f'mfcc_{i+1}_std'] = float(np.std(coef))
 
     # --- Harmonia ---
-    chroma = librosa.feature.chroma_stft(y=y, sr=sr)
+    chroma = librosa.feature.chroma_stft(S=stft**2, sr=sr)
     features['chroma_mean'] = float(np.mean(chroma))
     features['chroma_std'] = float(np.std(chroma))
 
@@ -157,7 +156,7 @@ def extract_features(y, sr) -> dict:
     features['dominant_key'] = notes[int(np.argmax(chroma_avg))]
 
     # --- Percussividade ---
-    # margin=2 reduz o kernel do filtro mediano interno (padrão é 1) >menos memória
+    # margin=2 aumenta a separação harmônica/percussiva (filtro mediano mais agressivo)
     harmonic, percussive = librosa.effects.hpss(y, margin=2)
     features['percussive_ratio'] = float(np.mean(np.abs(percussive)) / (np.mean(np.abs(y)) or 1))
 
@@ -205,7 +204,7 @@ _CAMELOT = {
     'E':  (12, 'B'), 'F':  (7,  'B'), 'F#': (2,  'B'), 'G':  (9,  'B'),
     'G#': (4,  'B'), 'A':  (11, 'B'), 'A#': (6,  'B'), 'B':  (1,  'B'),
     # Menores (para referência futura — hoje só detectamos a nota, não maior/menor)
-    'Am': (8,  'A'), 'A#m': (3, 'A'), 'Bm': (1,  'A'), 'Cm': (5,  'A'),
+    'Am': (8,  'A'), 'A#m': (3, 'A'), 'Bm': (10, 'A'), 'Cm': (5,  'A'),
     'C#m': (12, 'A'), 'Dm': (7, 'A'), 'D#m': (2, 'A'), 'Em': (9,  'A'),
     'Fm': (4,  'A'), 'F#m': (11,'A'), 'Gm': (6,  'A'), 'G#m': (1,  'A'),
 }
@@ -255,6 +254,7 @@ def dj_compatibility(fa: dict, fb: dict, ca: dict = None, cb: dict = None) -> di
     bpm_a, bpm_b = fa.get('bpm', 0), fb.get('bpm', 0)
     if bpm_a <= 0 or bpm_b <= 0:
         bpm_score = 0
+        tips.append("BPM não detectado em uma das faixas")
     else:
         # Testa BPM direto e dobro/metade (half-time mix)
         diffs = [
