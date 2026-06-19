@@ -1,3 +1,4 @@
+python-dotenv
 librosa
 numpy
 soundfile
@@ -6,3 +7,4 @@ scikit-learn
 rich
 matplotlib
 dearpygui
+mutagen

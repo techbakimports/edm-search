@@ -8,13 +8,19 @@ Uso:
     python main.py <pasta>   --export csv|json  # Exporta resultados
     python main.py --compare <arq1> <arq2>      # Compara duas músicas
     python main.py --gui                        # Abre a interface gráfica
+    python main.py --tag <arquivo|pasta>              # Taga arquivos pelo nome do arquivo
+    python main.py --tag <arquivo|pasta> --dry-run    # Pré-visualiza sem gravar
+    python main.py --tag <arquivo|pasta> --no-year    # Não busca ano na internet
+    python main.py --tag <arquivo|pasta> --no-cover   # Não baixa capa automática
+    python main.py --rename <arquivo|pasta>               # Renomeia arquivos (limpa lixo do nome)
+    python main.py --rename <arquivo|pasta> --dry-run     # Pré-visualiza sem renomear
+    python main.py --rename <arquivo|pasta> --no-titlecase # Sem Title Case
 """
 import argparse
 import os
 import json
 import csv
 import sys
-import math
 from datetime import datetime
 
 import numpy as np
@@ -22,11 +28,10 @@ from rich.console import Console
 from rich.table import Table
 from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn
-from rich.columns import Columns
 from rich.text import Text
 from rich import box
 
-from analyzer import analyze_file
+from analyzer import analyze_file, dj_compatibility
 from classifier import classify
 from config import SUPPORTED_FORMATS
 
@@ -76,9 +81,12 @@ def print_spectrum_bars(features: dict):
     onset    = features.get('onset_strength_mean', 0)
     onset_std= features.get('onset_strength_std', 0)
 
-    # Simula 40 amostras de amplitude variando em torno da média
-    rng = np.random.default_rng(seed=42)
-    samples = np.clip(rng.normal(rms_mean, rms_std * 0.5, 40), 0, None)
+    envelope = features.get('rms_envelope')
+    if envelope:
+        samples = np.array(envelope)
+    else:
+        rng = np.random.default_rng(seed=42)
+        samples = np.clip(rng.normal(rms_mean, rms_std * 0.5, 40), 0, None)
     max_s = samples.max() or 1
     waveform = ""
     for s in samples:
@@ -132,10 +140,6 @@ def compare_tracks(path1: str, path2: str):
     table.add_row("Subgênero",  c1['subgenre'] or "—", c2['subgenre'] or "—", "—")
     table.add_row("Confiança",  f"{c1['confidence']:.0%}", f"{c2['confidence']:.0%}", "—")
 
-    e1_bass  = f1['energy_sub_bass'] + f1['energy_bass']
-    e2_bass  = f2['energy_sub_bass'] + f2['energy_bass']
-    e1_high  = f1['energy_high']
-    e2_high  = f2['energy_high']
     table.add_row("Graves",     f"{f1['bass_ratio']:.0%}", f"{f2['bass_ratio']:.0%}", diff(f1['bass_ratio'], f2['bass_ratio'], ".0%", ""))
     table.add_row("Brilho",     f"{f1['spectral_centroid_mean']:.0f}Hz", f"{f2['spectral_centroid_mean']:.0f}Hz",
                   diff(f1['spectral_centroid_mean'], f2['spectral_centroid_mean'], ".0f", "Hz"))
@@ -144,64 +148,132 @@ def compare_tracks(path1: str, path2: str):
 
     console.print(table)
 
+    # ── Compatibilidade DJ ────────────────────────────────────────
+    compat = dj_compatibility(f1, f2, c1, c2)
+    score  = compat['score']
+    rating = compat['rating']
+
+    if score >= 85:
+        color = "green"
+    elif score >= 70:
+        color = "cyan"
+    elif score >= 50:
+        color = "yellow"
+    else:
+        color = "red"
+
+    bar_width = 30
+    filled = round(score / 100 * bar_width)
+    bar = f"[{color}]{'█' * filled}[/{color}][dim]{'░' * (bar_width - filled)}[/dim]"
+
+    console.print(Panel(
+        f"  {bar}  [{color} bold]{score}%[/{color} bold]  —  "
+        f"[{color} bold]{rating}[/{color} bold]\n\n"
+        f"  [dim]BPM {compat['bpm']['score']}%  ·  "
+        f"Tom {compat['key']['score']}%  ·  "
+        f"Energia {compat['energy']['score']}%  ·  "
+        f"Gênero {compat['genre']['score']}%[/dim]\n\n"
+        + "\n".join(f"  [dim]•[/dim] {tip}" for tip in compat['tips']),
+        title="[bold]Compatibilidade para Mixagem[/bold]",
+        border_style=color,
+        expand=False,
+        padding=(1, 2),
+    ))
+
     console.print("\n[bold white]  Espectro — Faixa 1[/bold white]")
     print_spectrum_bars(f1)
     console.print("[bold white]  Espectro — Faixa 2[/bold white]")
     print_spectrum_bars(f2)
 
 
+def _source_table(title: str, color: str) -> Table:
+    t = Table(title=title, box=box.SIMPLE_HEAD, border_style=color,
+              show_header=False, padding=(0, 2), title_style=f"bold {color}")
+    t.add_column(style="dim", width=14)
+    t.add_column(style="white")
+    return t
+
+
 def print_result(features: dict, classification: dict):
-    genre = classification.get('genre', '?')
-    subgenre = classification.get('subgenre') or '—'
-    confidence = classification.get('confidence', 0)
-    method = classification.get('method', 'rule-based')
-    bpm = features.get('bpm', 0)
-    key = features.get('dominant_key', '?')
+    bpm      = features.get('bpm', 0)
+    key      = features.get('dominant_key', '?')
     duration = features.get('duration_seconds', 0)
-    bass_ratio = features.get('bass_ratio', 0)
-    rms = features.get('rms_mean', 0)
 
     title = f"[bold cyan]{features.get('file_name', '')}[/bold cyan]"
     console.print(Panel(title, expand=False, border_style="cyan"))
 
-    # Info principal
-    table = Table(box=box.SIMPLE, show_header=False, padding=(0, 2))
-    table.add_column(style="dim", width=18)
-    table.add_column(style="bold white")
+    # ── Info de faixa ──────────────────────────────────────────────
+    info = Table(box=box.SIMPLE, show_header=False, padding=(0, 2))
+    info.add_column(style="dim", width=14)
+    info.add_column(style="bold white")
+    info.add_row("BPM",     f"[bold yellow]{bpm:.1f}[/bold yellow]")
+    info.add_row("Tom",     f"[magenta]{key}[/magenta]")
+    info.add_row("Duração", format_duration(duration))
+    console.print(info)
 
-    table.add_row("BPM",        f"[bold yellow]{bpm:.1f}[/bold yellow]")
-    table.add_row("Tom",        f"[magenta]{key}[/magenta]")
-    table.add_row("Duração",    format_duration(duration))
-    table.add_row("Gênero",     f"[bold green]{genre}[/bold green]")
-    table.add_row("Subgênero",  f"[green]{subgenre}[/green]")
-    table.add_row("Confiança",  f"{confidence:.0%} [dim]({method})[/dim]")
-    table.add_row("Graves",     f"{bass_ratio:.0%} do espectro")
-    table.add_row("Energia RMS",f"{rms:.4f}")
-
-    console.print(table)
     print_spectrum_bars(features)
 
-    # Candidatos alternativos
-    candidates = classification.get('candidates', [])
-    if len(candidates) > 1:
-        console.print("[dim]Outros candidatos:[/dim]")
-        alt_table = Table(box=box.SIMPLE, show_header=True, padding=(0, 2))
-        alt_table.add_column("#", style="dim", width=3)
-        alt_table.add_column("Gênero", style="white")
-        alt_table.add_column("Subgênero", style="white")
-        alt_table.add_column("Score", style="yellow")
-        alt_table.add_column("BPM Range", style="dim")
+    # ── Análise local ──────────────────────────────────────────────
+    rule_candidates = (classification.get('rule_based_candidates') or
+                       classification.get('candidates') or [])
+    top_rule = rule_candidates[0] if rule_candidates else {}
 
-        for i, c in enumerate(candidates[:5], 1):
-            style = "bold" if i == 1 else ""
-            alt_table.add_row(
-                str(i),
-                f"[{style}]{c['genre']}[/{style}]" if style else c['genre'],
-                c.get('subgenre') or '—',
-                f"{c['score']:.3f}",
-                c.get('bpm_range', '—'),
+    local = _source_table("Análise local  (áudio)", "cyan")
+    local.add_row("Gênero",    f"[bold]{top_rule.get('genre', '—')}[/bold]")
+    local.add_row("Subgênero", top_rule.get('subgenre') or '—')
+    local.add_row("Confiança", f"{top_rule.get('score', 0):.0%}  "
+                               f"[dim]({top_rule.get('method', 'rule-based')})[/dim]")
+    console.print(local)
+
+    if len(rule_candidates) > 1:
+        cand_table = Table(box=box.SIMPLE, show_header=True, padding=(0, 2))
+        cand_table.add_column("#",         style="dim", width=3)
+        cand_table.add_column("Gênero",    style="white")
+        cand_table.add_column("Subgênero", style="white")
+        cand_table.add_column("Score",     style="yellow", justify="right")
+        cand_table.add_column("BPM",       style="dim")
+        for i, c in enumerate(rule_candidates[:3], 1):
+            cand_table.add_row(
+                str(i), c['genre'], c.get('subgenre') or '—',
+                f"{c['score']:.0%}", c.get('bpm_range', '—'),
             )
-        console.print(alt_table)
+        console.print(cand_table)
+
+    # ── Spotify ────────────────────────────────────────────────────
+    ext = classification.get('lastfm')  # enricher retorna tudo num dict
+    sp_feats = (ext or {}).get('spotify_features') or {}
+
+    sp = _source_table("Spotify", "green")
+    if ext and ext.get('method') == 'spotify':
+        sp.add_row("Gênero",    f"[bold]{ext['genre']}[/bold]")
+        sp.add_row("Subgênero", ext.get('subgenre') or '—')
+        sp.add_row("Tags",      ", ".join(ext.get('top_tags', [])) or '—')
+    else:
+        sp.add_row("Gênero",    "[dim]não classificado[/dim]")
+        sp.add_row("Subgênero", "[dim]—[/dim]")
+
+    if sp_feats:
+        parts = []
+        if sp_feats.get('tempo'):       parts.append(f"BPM {sp_feats['tempo']:.0f}")
+        if sp_feats.get('energy')       is not None: parts.append(f"energy {sp_feats['energy']:.0%}")
+        if sp_feats.get('danceability') is not None: parts.append(f"dance {sp_feats['danceability']:.0%}")
+        if sp_feats.get('valence')      is not None: parts.append(f"valence {sp_feats['valence']:.0%}")
+        sp.add_row("Audio feats", "  ".join(parts) or '—')
+    else:
+        sp.add_row("Audio feats", "[dim]sem metadados[/dim]")
+    console.print(sp)
+
+    # ── Last.fm ────────────────────────────────────────────────────
+    lfm = _source_table("Last.fm", "red")
+    if ext and ext.get('method') == 'lastfm':
+        lfm.add_row("Gênero",    f"[bold]{ext['genre']}[/bold]")
+        lfm.add_row("Subgênero", ext.get('subgenre') or '—')
+        lfm.add_row("Tags",      ", ".join(ext.get('top_tags', [])) or '—')
+    else:
+        lfm.add_row("Gênero",    "[dim]não classificado[/dim]")
+        lfm.add_row("Subgênero", "[dim]—[/dim]")
+        lfm.add_row("Tags",      "[dim]sem metadados / não encontrado[/dim]")
+    console.print(lfm)
 
     console.print()
 
@@ -303,9 +375,9 @@ def analyze_batch(folder: str, export: str = None, plot: bool = False) -> list[d
         _export_results(results, folder, export)
 
     if plot:
+        from visualizer import plot_analysis
         for r in results:
             try:
-                from visualizer import plot_analysis
                 path = r['features']['file_path']
                 save = os.path.splitext(path)[0] + '_analysis.png'
                 plot_analysis(path, r['features'], r['classification'], save_path=save)
@@ -320,43 +392,261 @@ def _export_results(results: list[dict], folder: str, fmt: str):
     ts = datetime.now().strftime('%Y%m%d_%H%M%S')
     out_path = os.path.join(folder, f"edm_analysis_{ts}.{fmt}")
 
+    rows = []
+    for r in results:
+        f, c = r['features'], r['classification']
+        rows.append({
+            'file': f.get('file_name'),
+            'bpm': f.get('bpm'),
+            'key': f.get('dominant_key'),
+            'duration': f.get('duration_seconds'),
+            'genre': c.get('genre'),
+            'subgenre': c.get('subgenre'),
+            'confidence': c.get('confidence'),
+            'method': c.get('method'),
+        })
+
     if fmt == 'json':
-        rows = []
-        for r in results:
-            f, c = r['features'], r['classification']
-            rows.append({
-                'file': f.get('file_name'),
-                'bpm': f.get('bpm'),
-                'key': f.get('dominant_key'),
-                'duration': f.get('duration_seconds'),
-                'genre': c.get('genre'),
-                'subgenre': c.get('subgenre'),
-                'confidence': c.get('confidence'),
-                'method': c.get('method'),
-            })
         with open(out_path, 'w', encoding='utf-8') as fp:
             json.dump(rows, fp, ensure_ascii=False, indent=2)
 
     elif fmt == 'csv':
         with open(out_path, 'w', newline='', encoding='utf-8') as fp:
-            writer = csv.DictWriter(fp, fieldnames=[
-                'file', 'bpm', 'key', 'duration', 'genre', 'subgenre', 'confidence', 'method'
-            ])
+            fields = ['file', 'bpm', 'key', 'duration', 'genre', 'subgenre', 'confidence', 'method']
+            writer = csv.DictWriter(fp, fieldnames=fields)
             writer.writeheader()
-            for r in results:
-                f, c = r['features'], r['classification']
-                writer.writerow({
-                    'file': f.get('file_name'),
-                    'bpm': f.get('bpm'),
-                    'key': f.get('dominant_key'),
-                    'duration': f.get('duration_seconds'),
-                    'genre': c.get('genre'),
-                    'subgenre': c.get('subgenre'),
-                    'confidence': c.get('confidence'),
-                    'method': c.get('method'),
-                })
+            writer.writerows(rows)
 
     console.print(f"[green]Exportado: {out_path}[/green]")
+
+
+def tag_command(target: str, dry_run: bool, no_year: bool, no_cover: bool, no_genre: bool = False):
+    """Executa o auto-tagging a partir do nome dos arquivos."""
+    from tagger import tag_file, tag_folder
+
+    fetch_year  = not no_year
+    fetch_cover = not no_cover
+    fetch_genre = not no_genre
+
+    if os.path.isfile(target):
+        results = [tag_file(target, dry_run=dry_run, fetch_year_online=fetch_year,
+                            fetch_cover=fetch_cover, fetch_genre=fetch_genre)]
+    elif os.path.isdir(target):
+        console.print(f"[cyan]Buscando arquivos de áudio em: {target}[/cyan]\n")
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[cyan]{task.description}"),
+            console=console,
+            transient=True,
+        ) as prog:
+            prog.add_task("Tagging...", total=None)
+            results = tag_folder(target, dry_run=dry_run, fetch_year_online=fetch_year,
+                                 fetch_cover=fetch_cover, fetch_genre=fetch_genre)
+    else:
+        console.print(f"[red]Caminho não encontrado: {target}[/red]")
+        sys.exit(1)
+
+    mode_label = "[yellow](dry-run — nenhum arquivo foi alterado)[/yellow]" if dry_run else ""
+
+    table = Table(
+        title=f"Auto-tagging {mode_label}",
+        box=box.ROUNDED,
+        border_style="cyan",
+    )
+    table.add_column("Arquivo",  style="white",   max_width=35)
+    table.add_column("Artista",  style="cyan",    max_width=22)
+    table.add_column("Título",   style="magenta", max_width=30)
+    table.add_column("Gênero",   style="green",   max_width=22)
+    table.add_column("Ano",      style="yellow",  justify="center", width=6)
+    table.add_column("Capa",     justify="center", width=5)
+    table.add_column("Status",   justify="center", width=10)
+
+    ok = err = skip = 0
+    for r in results:
+        if r.get('error') and not r['written']:
+            status = f"[red]✗ {r['error']}[/red]"
+            err += 1
+        elif r['written']:
+            status = "[green]✓[/green]" if not dry_run else "[yellow]preview[/yellow]"
+            ok += 1
+        else:
+            status = "[dim]—[/dim]"
+            skip += 1
+
+        cover_col = "[green]✓[/green]" if r.get('cover_written') else "[dim]—[/dim]"
+
+        table.add_row(
+            r.get('file', ''),
+            r.get('artist') or '[dim]—[/dim]',
+            r.get('title') or '[dim]—[/dim]',
+            r.get('genre') or '[dim]—[/dim]',
+            r.get('year') or '[dim]—[/dim]',
+            cover_col,
+            status,
+        )
+
+    console.print(table)
+    covers_ok = sum(1 for r in results if r.get('cover_written'))
+    console.print(
+        f"\n  [green]{ok} arquivo(s) tagado(s)[/green]"
+        + (f"  [cyan]{covers_ok} capa(s) gravada(s)[/cyan]" if covers_ok else "")
+        + (f"  [red]{err} erro(s)[/red]" if err else "")
+        + (f"  [dim]{skip} ignorado(s)[/dim]" if skip else "")
+    )
+    if not no_year and any(r.get('year') in (None, '—') for r in results if r.get('artist')):
+        console.print("[dim]  Dica: use --no-year para pular a busca online se estiver offline.[/dim]")
+
+
+def rename_command(target: str, dry_run: bool, title_case: bool):
+    """Renomeia arquivos de áudio limpando lixo do nome."""
+    from tagger import rename_file, rename_folder
+
+    if os.path.isfile(target):
+        results = [rename_file(target, dry_run=dry_run, title_case=title_case)]
+    elif os.path.isdir(target):
+        console.print(f"[cyan]Buscando arquivos de áudio em: {target}[/cyan]\n")
+        results = rename_folder(target, dry_run=dry_run, title_case=title_case)
+    else:
+        console.print(f"[red]Caminho não encontrado: {target}[/red]")
+        sys.exit(1)
+
+    if not results:
+        console.print("[yellow]Nenhum arquivo de áudio encontrado.[/yellow]")
+        return
+
+    mode_label = "[yellow](dry-run — nenhum arquivo foi renomeado)[/yellow]" if dry_run else ""
+
+    table = Table(
+        title=f"Rename {mode_label}",
+        box=box.ROUNDED,
+        border_style="cyan",
+    )
+    table.add_column("Antes",  style="white",   max_width=50)
+    table.add_column("Depois", style="cyan",    max_width=50)
+    table.add_column("Status", justify="center", width=10)
+
+    renamed = unchanged = errors = 0
+    for r in results:
+        old = r.get('file', '')
+        new = r.get('new_name') or '—'
+
+        if r.get('error') and not r.get('renamed'):
+            status = f"[red]✗ {r['error'][:30]}[/red]"
+            errors += 1
+        elif r.get('renamed'):
+            status = "[green]✓[/green]" if not dry_run else "[yellow]preview[/yellow]"
+            renamed += 1
+        else:
+            status = "[dim]inalterado[/dim]"
+            unchanged += 1
+            new = "[dim]= igual[/dim]"
+
+        # Destaca as diferenças entre antes e depois
+        if r.get('renamed') and old != new:
+            table.add_row(f"[dim]{old}[/dim]", f"[bold]{new}[/bold]", status)
+        else:
+            table.add_row(old, new, status)
+
+    console.print(table)
+    console.print(
+        f"\n  [green]{renamed} renomeado(s)[/green]"
+        + (f"  [dim]{unchanged} inalterado(s)[/dim]" if unchanged else "")
+        + (f"  [red]{errors} erro(s)[/red]" if errors else "")
+    )
+
+
+def audit_command(dataset_dir: str, threshold: float = 0.8, export_fmt: str = None):
+    """Percorre o dataset, classifica com ML e reporta discordâncias de alta confiança."""
+    if not os.path.exists('model.pkl'):
+        console.print("[red]model.pkl não encontrado. Treine primeiro:[/red]")
+        console.print("[dim]  python trainer.py --dataset <pasta>[/dim]")
+        sys.exit(1)
+
+    from trainer import scan_dataset
+    from classifier import classify_ml
+
+    items = scan_dataset(dataset_dir)
+    if not items:
+        console.print("[red]Nenhuma faixa encontrada no dataset.[/red]")
+        return
+
+    console.print(f"[cyan]Auditando {len(items)} faixas (confiança mínima: {threshold:.0%})...[/cyan]\n")
+
+    suspects, errors = [], 0
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[cyan]{task.description}"),
+        BarColumn(),
+        TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+        console=console,
+    ) as progress:
+        task = progress.add_task("Auditando...", total=len(items))
+        for path, genre, subgenre in items:
+            progress.update(task, description=os.path.basename(path))
+            try:
+                features  = analyze_file(path)
+                ml_results = classify_ml(features)
+                if ml_results:
+                    top  = ml_results[0]
+                    conf = top['score']
+                    if (top['genre'] != genre or top['subgenre'] != subgenre) and conf >= threshold:
+                        suspects.append({
+                            'file':              os.path.basename(path),
+                            'path':              path,
+                            'declared_genre':    genre,
+                            'declared_subgenre': subgenre,
+                            'model_genre':       top['genre'],
+                            'model_subgenre':    top['subgenre'],
+                            'confidence':        conf,
+                        })
+            except Exception as e:
+                errors += 1
+                console.print(f"[red]  ✗ {os.path.basename(path)}: {e}[/red]")
+            progress.advance(task)
+
+    console.print()
+
+    if not suspects:
+        console.print(f"[green]Nenhuma discordância acima de {threshold:.0%}.[/green]")
+        if errors:
+            console.print(f"[yellow]{errors} arquivo(s) com erro.[/yellow]")
+        return
+
+    table = Table(
+        title=f"Suspeitos de rótulo errado — {len(suspects)} de {len(items)} faixas",
+        box=box.ROUNDED, border_style="yellow",
+    )
+    table.add_column("Arquivo",          style="white",  max_width=38)
+    table.add_column("Pasta (declarado)", style="dim",   max_width=24)
+    table.add_column("Modelo diz",        style="yellow", max_width=24)
+    table.add_column("Confiança",         style="cyan",  justify="right", width=10)
+
+    for s in suspects:
+        table.add_row(
+            s['file'],
+            f"{s['declared_genre']} / {s['declared_subgenre']}",
+            f"{s['model_genre']} / {s['model_subgenre']}",
+            f"{s['confidence']:.0%}",
+        )
+
+    console.print(table)
+
+    if errors:
+        console.print(f"\n[yellow]{errors} arquivo(s) com erro foram ignorados.[/yellow]")
+
+    if export_fmt:
+        ts      = datetime.now().strftime('%Y%m%d_%H%M%S')
+        out     = os.path.join(dataset_dir, f"audit_{ts}.{export_fmt}")
+        if export_fmt == 'csv':
+            with open(out, 'w', newline='', encoding='utf-8') as fp:
+                writer = csv.DictWriter(fp, fieldnames=list(suspects[0].keys()))
+                writer.writeheader()
+                writer.writerows(suspects)
+        elif export_fmt == 'json':
+            with open(out, 'w', encoding='utf-8') as fp:
+                json.dump(suspects, fp, ensure_ascii=False, indent=2)
+        console.print(f"[green]Relatório exportado: {out}[/green]")
 
 
 def main():
@@ -366,15 +656,45 @@ def main():
         epilog=__doc__,
     )
     parser.add_argument('input', nargs='?', help="Arquivo de áudio ou pasta")
-    parser.add_argument('--plot',    action='store_true', help="Exibe visualização gráfica")
-    parser.add_argument('--export',  choices=['csv', 'json'], help="Exporta resultados (pasta)")
-    parser.add_argument('--compare', nargs=2, metavar=('ARQUIVO1', 'ARQUIVO2'), help="Compara duas músicas")
-    parser.add_argument('--gui',     action='store_true', help="Abre a interface gráfica")
+    parser.add_argument('--plot',       action='store_true', help="Exibe visualização gráfica")
+    parser.add_argument('--export',     choices=['csv', 'json'], help="Exporta resultados")
+    parser.add_argument('--compare',    nargs=2, metavar=('ARQUIVO1', 'ARQUIVO2'), help="Compara duas músicas")
+    parser.add_argument('--gui',        action='store_true', help="Abre a interface gráfica")
+    parser.add_argument('--tag',        metavar='CAMINHO', help="Taga arquivos pelo nome do arquivo")
+    parser.add_argument('--dry-run',    action='store_true', help="Com --tag: pré-visualiza sem gravar")
+    parser.add_argument('--no-year',    action='store_true', help="Com --tag: não busca ano na internet")
+    parser.add_argument('--no-cover',   action='store_true', help="Com --tag: não baixa capa automática")
+    parser.add_argument('--no-genre',   action='store_true', help="Com --tag: não busca gênero automaticamente")
+    parser.add_argument('--rename',     metavar='CAMINHO', help="Renomeia arquivos limpando lixo do nome")
+    parser.add_argument('--no-titlecase', action='store_true', help="Com --rename: não aplica Title Case")
+    parser.add_argument('--train',      metavar='DATASET', help="Treina o modelo ML com o dataset (genre/subgenre/arquivo)")
+    parser.add_argument('--audit',      metavar='DATASET', help="Audita dataset: detecta faixas possivelmente mal rotuladas")
+    parser.add_argument('--threshold',  type=float, default=0.8, help="Com --audit: confiança mínima (padrão: 0.8)")
+    parser.add_argument('--estimators', type=int,   default=200, help="Com --train: número de árvores no Random Forest")
     args = parser.parse_args()
 
     if args.gui:
         from gui import launch
         launch()
+        return
+
+    if args.train:
+        from trainer import train
+        train(args.train, output_path='model.pkl', n_estimators=args.estimators)
+        return
+
+    if args.audit:
+        audit_command(args.audit, threshold=args.threshold, export_fmt=args.export)
+        return
+
+    if args.rename:
+        rename_command(args.rename, dry_run=args.dry_run,
+                       title_case=not args.no_titlecase)
+        return
+
+    if args.tag:
+        tag_command(args.tag, dry_run=args.dry_run, no_year=args.no_year,
+                    no_cover=args.no_cover, no_genre=args.no_genre)
         return
 
     if args.compare:

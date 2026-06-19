@@ -1,5 +1,14 @@
+import os
+from dotenv import load_dotenv
+
 # Taxonomia de gêneros e subgêneros da música eletrônica
 # (genre, subgenre, bpm_min, bpm_max, tags espectrais)
+
+APP_NAME        = "EDM Analyzer"
+APP_VERSION     = "1.0.0"
+COMPANY_NAME    = "Techbak Solutions"
+APP_DESCRIPTION = "Análise profissional de música eletrônica"
+APP_COPYRIGHT   = "© 2026 Techbak Solutions. Todos os direitos reservados."
 
 GENRE_TAXONOMY = [
 
@@ -111,6 +120,32 @@ SPECTRAL_THRESHOLDS = {
     "bass_heavy_rolloff": 0.55,
     "high_zcr":           0.08,
     "low_zcr":            0.03,
+
+    # warm: timbre suave, dominância de low-mid, sem harshness
+    "warm_max_zcr":           0.05,
+    "warm_max_high_ratio":    0.20,
+    "warm_min_bass_ratio":    0.30,
+    "warm_max_centroid":      3000,
+
+    # textural: sons sustentados e não-percussivos, espectro largo
+    "textural_max_percussive": 0.45,
+    "textural_min_bandwidth":  1500,
+
+    # sparse: poucos eventos, baixa densidade de onsets
+    "sparse_max_onset":        1.5,
+
+    # acid: sweeps de filtro ressonante (aproximação via variância do centroid)
+    "acid_min_centroid_std":   500,
+    "acid_min_bass_ratio":     0.35,
 }
 
-SUPPORTED_FORMATS = [".mp3", ".wav", ".flac", ".ogg", ".m4a", ".aiff"]
+SUPPORTED_FORMATS = (".mp3", ".wav", ".flac", ".ogg", ".m4a", ".aiff")
+
+load_dotenv()
+
+# APIs externas (deixe vazio "" no .env para desativar)
+LASTFM_API_KEY        = os.getenv("LASTFM_API_KEY", "")
+SPOTIFY_CLIENT_ID     = os.getenv("SPOTIFY_CLIENT_ID", "")
+SPOTIFY_CLIENT_SECRET = os.getenv("SPOTIFY_CLIENT_SECRET", "")
+DISCOGS_KEY           = os.getenv("DISCOGS_KEY", "")
+DISCOGS_SECRET        = os.getenv("DISCOGS_SECRET", "")

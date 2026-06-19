@@ -51,3 +51,4 @@ pip install -r requirements.txt
 - `visualizer.py`: Geração de gráficos.
 - `config.py`: Configurações e definições.
 - `trainer.py`: Funcionalidades adicionais para treinamento/ajustes de regras.
+
