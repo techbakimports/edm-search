@@ -98,7 +98,7 @@ def _derive_tags(features: dict) -> set:
 _NEGATION_PREFIX = "no_"
 
 
-def _score_candidate(bpm: float, features: dict, genre_entry: tuple, faixa_tags: set) -> float:
+def _score_candidate(bpm: float, genre_entry: tuple, faixa_tags: set) -> float:
     """Calcula um score de 0–1 para o quão bem a faixa se encaixa num gênero."""
     _, _, bpm_min, bpm_max, genre_tags = genre_entry
 
@@ -150,7 +150,7 @@ def classify_rule_based(features: dict, top_n: int = 5) -> list[dict]:
             continue
         for entry in GENRE_TAXONOMY:
             genre, subgenre, bpm_min, bpm_max, _ = entry
-            score = _score_candidate(test_bpm, features, entry, faixa_tags)
+            score = _score_candidate(test_bpm, entry, faixa_tags)
             if score <= 0:
                 continue
             key = (genre, subgenre)
@@ -187,7 +187,8 @@ def classify_ml(features: dict, model_path: str = _MODEL_PATH) -> list[dict]:
         probs = model.predict_proba(vec_scaled)[0]
         results = []
         for label, prob in zip(label_names, probs):
-            genre, subgenre = label.split('|')
+            parts = label.split('|', 1)
+            genre, subgenre = parts[0], parts[1] if len(parts) > 1 else '?'
             results.append({
                 'genre': genre,
                 'subgenre': subgenre,
@@ -198,7 +199,7 @@ def classify_ml(features: dict, model_path: str = _MODEL_PATH) -> list[dict]:
         results.sort(key=lambda x: x['score'], reverse=True)
         return results[:5]
 
-    except FileNotFoundError:
+    except Exception:
         return []
 
 

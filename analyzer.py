@@ -121,18 +121,18 @@ def extract_features(y, sr) -> dict:
     features['bass_ratio'] = (features['energy_sub_bass'] + features['energy_bass']) / total_energy
     features['high_ratio'] = features['energy_high'] / total_energy
 
-    # --- Espectral ---
-    centroid = librosa.feature.spectral_centroid(y=y, sr=sr)[0]
+    # --- Espectral (reutiliza magnitude STFT já calculado) ---
+    centroid = librosa.feature.spectral_centroid(S=stft, sr=sr)[0]
     features['spectral_centroid_mean'] = float(np.mean(centroid))
     features['spectral_centroid_std'] = float(np.std(centroid))
 
-    rolloff = librosa.feature.spectral_rolloff(y=y, sr=sr)[0]
+    rolloff = librosa.feature.spectral_rolloff(S=stft, sr=sr)[0]
     features['spectral_rolloff_mean'] = float(np.mean(rolloff))
 
-    bandwidth = librosa.feature.spectral_bandwidth(y=y, sr=sr)[0]
+    bandwidth = librosa.feature.spectral_bandwidth(S=stft, sr=sr)[0]
     features['spectral_bandwidth_mean'] = float(np.mean(bandwidth))
 
-    contrast = librosa.feature.spectral_contrast(y=y, sr=sr)
+    contrast = librosa.feature.spectral_contrast(S=stft, sr=sr)
     features['spectral_contrast_mean'] = float(np.mean(contrast))
 
     # Zero-crossing rate (percussividade / noise)
@@ -150,14 +150,25 @@ def extract_features(y, sr) -> dict:
     features['chroma_mean'] = float(np.mean(chroma))
     features['chroma_std'] = float(np.std(chroma))
 
-    # Tonalidade dominante
+    # Tonalidade dominante (Krumhansl-Schmuckler key-finding)
     chroma_avg = np.mean(chroma, axis=1)
+    _MAJOR_PROFILE = np.array([6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88])
+    _MINOR_PROFILE = np.array([6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17])
     notes = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B']
-    features['dominant_key'] = notes[int(np.argmax(chroma_avg))]
+    best_corr, best_key = -2, 'C'
+    for i in range(12):
+        rotated = np.roll(chroma_avg, -i)
+        corr_maj = float(np.corrcoef(rotated, _MAJOR_PROFILE)[0, 1])
+        corr_min = float(np.corrcoef(rotated, _MINOR_PROFILE)[0, 1])
+        if corr_maj > best_corr:
+            best_corr, best_key = corr_maj, notes[i]
+        if corr_min > best_corr:
+            best_corr, best_key = corr_min, f"{notes[i]}m"
+    features['dominant_key'] = best_key
 
     # --- Percussividade ---
     # margin=2 aumenta a separação harmônica/percussiva (filtro mediano mais agressivo)
-    harmonic, percussive = librosa.effects.hpss(y, margin=2)
+    _, percussive = librosa.effects.hpss(y, margin=2)
     features['percussive_ratio'] = float(np.mean(np.abs(percussive)) / (np.mean(np.abs(y)) or 1))
 
     # Onset strength (intensidade das batidas)

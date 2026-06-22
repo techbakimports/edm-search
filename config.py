@@ -19,7 +19,7 @@ GENRE_TAXONOMY = [
     ("Downtempo",       "Chillout",             70,  95,  ["low_energy", "warm", "melodic"]),
     ("Downtempo",       "Trip Hop",             70,  95,  ["mid_energy", "dark", "bass_heavy"]),
     ("Downtempo",       "Lo-fi Hip Hop",        70,  95,  ["low_energy", "warm", "textural"]),
-    ("Downtempo",       "Dub Techno",           100, 122, ["mid_energy", "dark", "repetitive", "bass_heavy"]),
+    ("Techno",          "Dub Techno",           100, 122, ["mid_energy", "dark", "repetitive", "bass_heavy"]),
     ("Downtempo",       "Electronica",          80,  120, ["mid_energy", "melodic", "textural"]),
 
     # ── ELETRÔNICO ALTERNATIVO ───────────────────────────────────────
