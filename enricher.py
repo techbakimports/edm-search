@@ -213,21 +213,24 @@ def _spotify_token() -> str | None:
     with _sp_lock:
         if _sp_token and time.time() < _sp_token_expires - 60:
             return _sp_token
-        creds = base64.b64encode(f"{SPOTIFY_CLIENT_ID}:{SPOTIFY_CLIENT_SECRET}".encode()).decode()
-        req = urllib.request.Request(
-            'https://accounts.spotify.com/api/token',
-            data=urllib.parse.urlencode({'grant_type': 'client_credentials'}).encode(),
-            headers={
-                'Authorization': f'Basic {creds}',
-                'Content-Type': 'application/x-www-form-urlencoded',
-            },
-            method='POST',
-        )
-        with urllib.request.urlopen(req, timeout=6) as resp:
-            data = json.loads(resp.read().decode())
-        _sp_token = data['access_token']
-        _sp_token_expires = time.time() + data.get('expires_in', 3600)
-        return _sp_token
+        try:
+            creds = base64.b64encode(f"{SPOTIFY_CLIENT_ID}:{SPOTIFY_CLIENT_SECRET}".encode()).decode()
+            req = urllib.request.Request(
+                'https://accounts.spotify.com/api/token',
+                data=urllib.parse.urlencode({'grant_type': 'client_credentials'}).encode(),
+                headers={
+                    'Authorization': f'Basic {creds}',
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                },
+                method='POST',
+            )
+            with urllib.request.urlopen(req, timeout=6) as resp:
+                data = json.loads(resp.read().decode())
+            _sp_token = data['access_token']
+            _sp_token_expires = time.time() + data.get('expires_in', 3600)
+            return _sp_token
+        except Exception:
+            return None
 
 
 def _spotify_get(endpoint: str, token: str) -> dict:
@@ -242,7 +245,7 @@ def _spotify_get(endpoint: str, token: str) -> dict:
 def fetch_spotify_data(artist: str, title: str) -> dict | None:
     """
     Busca faixa no Spotify.
-    Retorna {'genres', 'audio_features', 'track_name', 'artist_name'} ou None.
+    Retorna {'genres', 'track_name', 'artist_name'} ou None.
     """
     try:
         token = _spotify_token()
@@ -260,25 +263,14 @@ def fetch_spotify_data(artist: str, title: str) -> dict | None:
             return None
 
         track     = items[0]
-        track_id  = track['id']
         artist_id = track['artists'][0]['id']
 
-        features    = _spotify_get(f'audio-features/{track_id}', token)
         artist_data = _spotify_get(f'artists/{artist_id}', token)
 
         return {
             'track_name':     track['name'],
             'artist_name':    track['artists'][0]['name'],
             'genres':         [g.lower() for g in artist_data.get('genres', [])],
-            'audio_features': {
-                'tempo':           features.get('tempo'),
-                'energy':          features.get('energy'),
-                'danceability':    features.get('danceability'),
-                'valence':         features.get('valence'),
-                'instrumentalness': features.get('instrumentalness'),
-                'acousticness':    features.get('acousticness'),
-                'loudness':        features.get('loudness'),
-            },
         }
     except Exception:
         return None
@@ -310,21 +302,18 @@ def enrich(path: str) -> dict | None:
     # ── Spotify ──
     sp_genre = sp_sub = None
     sp_confidence = 0.0
-    sp_features: dict = {}
     sp_genres: list[str] = []
-    sp_data = fetch_spotify_data(artist, title)
-    if sp_data:
-        sp_genres  = sp_data['genres']
-        sp_features = sp_data['audio_features']
-        # Mapeia gêneros do artista usando o mesmo lookup de tags
-        for g in sp_genres:
-            if g in _TAG_LOOKUP:
-                sp_genre, sp_sub = _TAG_LOOKUP[g]
-                sp_confidence = 0.4  # gênero de artista é menos específico que tag de faixa
-                break
+    if SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET:
+        sp_data = fetch_spotify_data(artist, title)
+        if sp_data:
+            sp_genres = sp_data['genres']
+            for g in sp_genres:
+                if g in _TAG_LOOKUP:
+                    sp_genre, sp_sub = _TAG_LOOKUP[g]
+                    sp_confidence = 0.4
+                    break
 
     # ── Escolha final ──
-    # Last.fm ganha se tiver confiança razoável; senão usa Spotify
     if lfm_genre and lfm_confidence >= 0.10:
         result.update({
             'genre': lfm_genre, 'subgenre': lfm_sub,
@@ -338,11 +327,6 @@ def enrich(path: str) -> dict | None:
             'top_tags': sp_genres[:5],
         })
     else:
-        if not sp_features:
-            return None
-        # Sem gênero mapeável, mas temos audio features do Spotify
-        result['spotify_features'] = sp_features
-        return result
+        return None
 
-    result['spotify_features'] = sp_features
     return result

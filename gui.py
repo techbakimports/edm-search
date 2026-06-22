@@ -48,6 +48,7 @@ _tracks        = {"A": None, "B": None}
 _batch_results: list[dict] = []
 _batch_folder:  str | None = None
 _dl_process:      "subprocess.Popen | None" = None
+_dl_process_lock: threading.Lock            = threading.Lock()
 _dl_dest_folder:  str                       = os.path.expanduser("~/Downloads")
 _dl_log_lines:    list                      = []
 _dl_log_lock:     threading.Lock            = threading.Lock()
@@ -158,12 +159,15 @@ def _win_open_folder(title="Selecionar pasta") -> str | None:
     bi.ulFlags        = 0x0001 | 0x0040  # BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE
 
     ctypes.windll.ole32.CoInitialize(None)
-    pidl = browse(ctypes.byref(bi))
-    if pidl:
-        get_path(ctypes.c_void_p(pidl), path_buf)
-        ctypes.windll.ole32.CoTaskMemFree(ctypes.c_void_p(pidl))
-        return path_buf.value or None
-    return None
+    try:
+        pidl = browse(ctypes.byref(bi))
+        if pidl:
+            get_path(ctypes.c_void_p(pidl), path_buf)
+            ctypes.windll.ole32.CoTaskMemFree(ctypes.c_void_p(pidl))
+            return path_buf.value or None
+        return None
+    finally:
+        ctypes.windll.ole32.CoUninitialize()
 
 
 def _win_save_file(title="Salvar", filter_str="CSV\0*.csv\0", default_ext="csv") -> str | None:
@@ -888,7 +892,8 @@ def _dl_append_log(line: str):
 
 
 def _stop_download():
-    proc = _dl_process
+    with _dl_process_lock:
+        proc = _dl_process
     if proc is not None and proc.poll() is None:
         proc.terminate()
         _ui(dpg.set_value,      W["dl_status"],   "Download cancelado.")
@@ -971,7 +976,8 @@ def _run_download(direct_url: str | None = None, direct_audio: bool | None = Non
                 errors="replace",
                 creationflags=subprocess.CREATE_NO_WINDOW,
             )
-            _dl_process = proc
+            with _dl_process_lock:
+                _dl_process = proc
             for raw in proc.stdout:
                 line = raw.rstrip()
                 if not line:
@@ -996,7 +1002,8 @@ def _run_download(direct_url: str | None = None, direct_audio: bool | None = Non
             traceback.print_exc()
             _ui(dpg.set_value, W["dl_status"], f"Erro: {e}")
         finally:
-            _dl_process = None
+            with _dl_process_lock:
+                _dl_process = None
             _ui(dpg.configure_item, W["dl_run_btn"],  enabled=True)
             _ui(dpg.configure_item, W["dl_stop_btn"], enabled=False)
 

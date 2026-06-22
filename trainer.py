@@ -37,7 +37,7 @@ NUMERIC_FEATURES = [
 ] + [f'mfcc_{i}_mean' for i in range(1, 14)] + [f'mfcc_{i}_std' for i in range(1, 14)]
 
 
-CHECKPOINT_PATH = 'train_checkpoint.pkl'
+CHECKPOINT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'train_checkpoint.pkl')
 
 
 def save_checkpoint(dataset_dir: str, items: list, done_paths: set,
@@ -168,9 +168,12 @@ def train(dataset_dir: str, output_path: str = 'model.pkl', n_estimators: int = 
 
     model = RandomForestClassifier(n_estimators=n_estimators, random_state=42, n_jobs=-1)
 
-    cv = min(5, len(set(y_labels)))
+    from collections import Counter
+    class_counts = Counter(y_labels)
+    min_samples = min(class_counts.values())
+    cv = min(5, min_samples)
     if cv < 2:
-        console.print("[yellow]Poucas classes para validação cruzada, pulando...[/yellow]")
+        console.print("[yellow]Poucas amostras por classe para validação cruzada, pulando...[/yellow]")
     else:
         console.print(f"[cyan]Validação cruzada ({cv}-fold)...[/cyan]")
         scores = cross_val_score(model, X_scaled, y_arr, cv=cv)

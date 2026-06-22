@@ -754,10 +754,26 @@ def _image_mime(data: bytes) -> str:
     return 'image/jpeg'
 
 
+def _ensure_jpeg_or_png(image_bytes: bytes, mime: str) -> tuple[bytes, str]:
+    """Converte WebP/GIF para PNG. Retorna (bytes, mime) compatíveis."""
+    if mime in ('image/jpeg', 'image/png'):
+        return image_bytes, mime
+    try:
+        import io
+        from PIL import Image
+        img = Image.open(io.BytesIO(image_bytes)).convert('RGBA')
+        buf = io.BytesIO()
+        img.save(buf, format='PNG')
+        return buf.getvalue(), 'image/png'
+    except Exception:
+        return image_bytes, mime
+
+
 def write_cover(path: str, image_bytes: bytes) -> bool:
     """Grava a capa no arquivo de áudio. Suporta MP3, FLAC, M4A, OGG, AIFF."""
     ext  = Path(path).suffix.lower()
     mime = _image_mime(image_bytes)
+    image_bytes, mime = _ensure_jpeg_or_png(image_bytes, mime)
     try:
         if ext == '.mp3':
             from mutagen.id3 import ID3, APIC

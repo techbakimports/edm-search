@@ -113,11 +113,15 @@ def compare_tracks(path1: str, path2: str):
 
     results = []
     for path in [path1, path2]:
-        with Progress(SpinnerColumn(), TextColumn("[cyan]{task.description}"), transient=True, console=console) as p:
-            p.add_task(os.path.basename(path), total=None)
-            f = analyze_file(path)
-            c = classify(f)
-        results.append((f, c))
+        try:
+            with Progress(SpinnerColumn(), TextColumn("[cyan]{task.description}"), transient=True, console=console) as p:
+                p.add_task(os.path.basename(path), total=None)
+                f = analyze_file(path)
+                c = classify(f)
+            results.append((f, c))
+        except Exception as e:
+            console.print(f"[red]Erro ao analisar {os.path.basename(path)}: {e}[/red]")
+            return
 
     (f1, c1), (f2, c2) = results
 
@@ -375,8 +379,14 @@ def analyze_batch(folder: str, export: str = None, plot: bool = False) -> list[d
         _export_results(results, folder, export)
 
     if plot:
-        from visualizer import plot_analysis
+        try:
+            from visualizer import plot_analysis
+        except ImportError:
+            console.print("[yellow]Módulo 'visualizer' não encontrado. Pulando gráficos.[/yellow]")
+            plot_analysis = None
         for r in results:
+            if not plot_analysis:
+                break
             try:
                 path = r['features']['file_path']
                 save = os.path.splitext(path)[0] + '_analysis.png'
