@@ -155,7 +155,7 @@ def extract_features(y, sr) -> dict:
     _MAJOR_PROFILE = np.array([6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88])
     _MINOR_PROFILE = np.array([6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17])
     notes = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B']
-    best_corr, best_key = -2, 'C'
+    best_corr, best_key = -2.0, 'C'
     for i in range(12):
         rotated = np.roll(chroma_avg, -i)
         corr_maj = float(np.corrcoef(rotated, _MAJOR_PROFILE)[0, 1])

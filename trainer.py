@@ -170,10 +170,11 @@ def train(dataset_dir: str, output_path: str = 'model.pkl', n_estimators: int = 
 
     from collections import Counter
     class_counts = Counter(y_labels)
-    min_samples = min(class_counts.values())
+    min_samples = min(class_counts.values()) if class_counts else 0
     cv = min(5, min_samples)
     if cv < 2:
         console.print("[yellow]Poucas amostras por classe para validação cruzada, pulando...[/yellow]")
+        cv = 0
     else:
         console.print(f"[cyan]Validação cruzada ({cv}-fold)...[/cyan]")
         scores = cross_val_score(model, X_scaled, y_arr, cv=cv)
