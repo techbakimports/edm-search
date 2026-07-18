@@ -663,8 +663,14 @@ def _dl_install_ytdlp():
             pass
 
         if pip_ok and _find_ytdlp():
+            info = _find_ytdlp_info()
+            ver = _get_ytdlp_version(info[0]) if info else "?"
+            origin_label = {"pip": "pip", "local_exe": ".exe local",
+                            "choco": "Chocolatey", "scoop": "Scoop", "system": "sistema"}
             _ui(dpg.set_value,      W["dl_status"],     "yt-dlp instalado via pip! Pronto para usar.")
+            _ui(dpg.set_value,      W["dl_ytdlp_ver"],  f"yt-dlp {ver} ({origin_label.get(info[1], '?')})")
             _ui(dpg.configure_item, W["dl_ytdlp_warn"], show=False)
+            _ui(dpg.configure_item, W["dl_update_grp"],  show=True)
             _ui(dpg.configure_item, W["dl_install_btn"], enabled=True)
             return
 
@@ -677,8 +683,11 @@ def _dl_install_ytdlp():
                                     "yt-dlp.exe")
             urllib.request.urlretrieve(_YTDLP_EXE_URL, dest_exe)
             if os.path.isfile(dest_exe) and os.path.getsize(dest_exe) > 0:
+                ver = _get_ytdlp_version(dest_exe)
                 _ui(dpg.set_value,      W["dl_status"],     "yt-dlp.exe baixado! Pronto para usar.")
+                _ui(dpg.set_value,      W["dl_ytdlp_ver"],  f"yt-dlp {ver} (.exe local)")
                 _ui(dpg.configure_item, W["dl_ytdlp_warn"], show=False)
+                _ui(dpg.configure_item, W["dl_update_grp"],  show=True)
             else:
                 raise RuntimeError("Arquivo baixado está vazio.")
         except Exception as e:
@@ -841,12 +850,146 @@ def _dl_from_result(url: str, audio: bool):
 
 
 def _find_ytdlp() -> str | None:
+    """Retorna o caminho do yt-dlp ou None."""
+    info = _find_ytdlp_info()
+    return info[0] if info else None
+
+
+def _find_ytdlp_info() -> tuple[str, str] | None:
+    """Retorna (caminho, origem) do yt-dlp ou None.
+    Origem: 'local_exe', 'pip', 'system'."""
     here = os.path.dirname(os.path.abspath(__file__))
     for name in ("yt-dlp.exe", "yt-dlp"):
         candidate = os.path.join(here, name)
         if os.path.isfile(candidate):
-            return candidate
-    return shutil.which("yt-dlp")
+            return candidate, "local_exe"
+    path = shutil.which("yt-dlp")
+    if not path:
+        return None
+    norm = os.path.normpath(path).lower()
+    if "scripts" in norm and ("python" in norm or "site-packages" in norm.replace("scripts", "")):
+        return path, "pip"
+    if "chocolatey" in norm:
+        return path, "choco"
+    if "scoop" in norm:
+        return path, "scoop"
+    return path, "system"
+
+
+def _get_ytdlp_version(exe: str) -> str:
+    try:
+        r = subprocess.run(
+            [exe, "--version"],
+            capture_output=True, text=True, encoding="utf-8",
+            creationflags=subprocess.CREATE_NO_WINDOW,
+            timeout=10,
+        )
+        return r.stdout.strip() if r.returncode == 0 else "?"
+    except Exception:
+        return "?"
+
+
+def _dl_update_ytdlp():
+    """Atualiza yt-dlp usando o método correspondente à instalação."""
+    info = _find_ytdlp_info()
+    if not info:
+        _ui(dpg.set_value, W["dl_status"], "yt-dlp não encontrado. Instale primeiro.")
+        return
+
+    exe, origin = info
+    _ui(dpg.configure_item, W["dl_update_btn"], enabled=False)
+
+    def _do():
+        try:
+            old_ver = _get_ytdlp_version(exe)
+
+            if origin == "pip":
+                _ui(dpg.set_value, W["dl_status"], "Atualizando yt-dlp via pip...")
+                r = subprocess.run(
+                    [sys.executable, "-m", "pip", "install", "--upgrade", "yt-dlp"],
+                    capture_output=True, text=True, encoding="utf-8",
+                    creationflags=subprocess.CREATE_NO_WINDOW,
+                    timeout=120,
+                )
+                if r.returncode != 0:
+                    _ui(dpg.set_value, W["dl_status"], f"pip upgrade falhou: {r.stderr[:100]}")
+                    return
+
+            elif origin == "local_exe":
+                _ui(dpg.set_value, W["dl_status"], "Baixando yt-dlp.exe mais recente...")
+                import urllib.request
+                dest = os.path.join(os.path.dirname(os.path.abspath(__file__)), "yt-dlp.exe")
+                tmp = dest + ".tmp"
+                urllib.request.urlretrieve(_YTDLP_EXE_URL, tmp)
+                if os.path.isfile(tmp) and os.path.getsize(tmp) > 0:
+                    os.replace(tmp, dest)
+                else:
+                    raise RuntimeError("Download vazio")
+
+            elif origin == "choco":
+                _ui(dpg.set_value, W["dl_status"], "Atualizando yt-dlp via Chocolatey (requer admin)...")
+                choco = shutil.which("choco")
+                if not choco:
+                    _ui(dpg.set_value, W["dl_status"],
+                        "Chocolatey não encontrado no PATH. Atualize manualmente: choco upgrade yt-dlp")
+                    return
+                r = subprocess.run(
+                    ["powershell", "-Command",
+                     "Start-Process -FilePath 'choco' "
+                     "-ArgumentList 'upgrade','yt-dlp','-y' "
+                     "-Verb RunAs -Wait"],
+                    capture_output=True, text=True, encoding="utf-8",
+                    creationflags=subprocess.CREATE_NO_WINDOW,
+                    timeout=180,
+                )
+                if r.returncode != 0:
+                    _ui(dpg.set_value, W["dl_status"],
+                        "Atualização via Chocolatey cancelada ou falhou. "
+                        "Abra um terminal admin e rode: choco upgrade yt-dlp -y")
+                    return
+
+            elif origin == "scoop":
+                _ui(dpg.set_value, W["dl_status"], "Atualizando yt-dlp via Scoop...")
+                r = subprocess.run(
+                    ["scoop", "update", "yt-dlp"],
+                    capture_output=True, text=True, encoding="utf-8",
+                    creationflags=subprocess.CREATE_NO_WINDOW,
+                    timeout=120,
+                )
+                if r.returncode != 0:
+                    _ui(dpg.set_value, W["dl_status"], f"scoop update falhou: {r.stderr[:100]}")
+                    return
+
+            else:
+                _ui(dpg.set_value, W["dl_status"], "Atualizando yt-dlp via --update...")
+                r = subprocess.run(
+                    [exe, "--update"],
+                    capture_output=True, text=True, encoding="utf-8",
+                    creationflags=subprocess.CREATE_NO_WINDOW,
+                    timeout=120,
+                )
+                if r.returncode != 0:
+                    _ui(dpg.set_value, W["dl_status"], f"Falha no --update: {r.stderr[:100]}")
+                    return
+
+            new_info = _find_ytdlp_info()
+            new_ver = _get_ytdlp_version(new_info[0]) if new_info else "?"
+            origin_label = {"pip": "pip", "local_exe": ".exe local",
+                            "choco": "Chocolatey", "scoop": "Scoop", "system": "sistema"}
+            if old_ver == new_ver:
+                _ui(dpg.set_value, W["dl_status"],
+                    f"yt-dlp já está na versão mais recente ({new_ver}) — via {origin_label.get(origin, origin)}")
+            else:
+                _ui(dpg.set_value, W["dl_status"],
+                    f"yt-dlp atualizado: {old_ver} → {new_ver} — via {origin_label.get(origin, origin)}")
+            _ui(dpg.set_value, W["dl_ytdlp_ver"], f"yt-dlp {new_ver} ({origin_label.get(origin, origin)})")
+
+        except Exception as e:
+            _ui(dpg.set_value, W["dl_status"], f"Erro ao atualizar: {e}")
+        finally:
+            _ui(dpg.configure_item, W["dl_update_btn"], enabled=True)
+
+    threading.Thread(target=_do, daemon=True).start()
 
 
 def _dl_paste_url():
@@ -1016,13 +1159,30 @@ def _build_download_tab():
     dpg.add_spacer(height=6)
 
     # ── Aviso de instalação ───────────────────────────────────────────
-    with dpg.group(horizontal=True, show=not bool(_find_ytdlp())) as _warn:
+    _ytdlp_info = _find_ytdlp_info()
+    with dpg.group(horizontal=True, show=not bool(_ytdlp_info)) as _warn:
         dpg.add_text("  yt-dlp não encontrado.", color=YELLOW)
         dpg.add_spacer(width=10)
         W["dl_install_btn"] = dpg.add_button(
             label=" Instalar yt-dlp ", callback=lambda *_: _dl_install_ytdlp(),
         )
     W["dl_ytdlp_warn"] = _warn
+
+    # ── Versão + atualizar ────────────────────────────────────────────
+    _origin_labels = {"pip": "pip", "local_exe": ".exe local",
+                       "choco": "Chocolatey", "scoop": "Scoop", "system": "sistema"}
+    if _ytdlp_info:
+        _ver = _get_ytdlp_version(_ytdlp_info[0])
+        _ver_text = f"yt-dlp {_ver} ({_origin_labels.get(_ytdlp_info[1], '?')})"
+    else:
+        _ver_text = ""
+    with dpg.group(horizontal=True, show=bool(_ytdlp_info)) as _upd_grp:
+        W["dl_ytdlp_ver"] = dpg.add_text(f"  {_ver_text}", color=DIM)
+        dpg.add_spacer(width=10)
+        W["dl_update_btn"] = dpg.add_button(
+            label=" Atualizar ", callback=lambda *_: _dl_update_ytdlp(),
+        )
+    W["dl_update_grp"] = _upd_grp
     dpg.add_spacer(height=4)
 
     # ── Pesquisa YouTube ──────────────────────────────────────────────
